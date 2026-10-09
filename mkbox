@@ -19,6 +19,23 @@
 set -euo pipefail
 
 SUBDIRS=(nmap web loot exploits creds notes screenshots transfer)
+IP_RE='^[A-Za-z0-9.:-]+$'      # accepted target IP/hostname; also exported to the box shell for `setip`
+
+# env_get <box_dir> <VAR>: read one variable from box.env ("" if unset or the file is missing)
+env_get() {
+  [[ -f "$1/box.env" ]] || return 0
+  ( . "$1/box.env" 2>/dev/null; printf '%s' "${!2:-}" ) || true
+}
+
+# write_env <box_dir> <ip> <ports> <udp_ports>: rewrite box.env atomically (temp file + rename),
+# so a tab that re-reads it at that moment never sees a half-written file
+write_env() {
+  local t
+  t="$(mktemp "$1/.box.env.XXXXXX")"
+  printf 'export IP=%q\nexport PORTS=%q\nexport UDP_PORTS=%q\n' "$2" "$3" "$4" > "$t"
+  chmod 644 "$t"
+  mv -f "$t" "$1/box.env"
+}
 
 usage() {
   cat >&2 <<'U'
@@ -30,13 +47,64 @@ U
   exit "${1:-1}"
 }
 
-# clean_log <raw>: print the raw log with ANSI/OSC escapes, carriage returns and backspaces removed
+# Line-level terminal emulation used by clean_log. For each line it keeps a cursor and applies what
+# a terminal would: \r and \b move the cursor and later characters OVERWRITE (nothing is deleted),
+# ESC[K erases to end of line, ESC[nC / ESC[nD / ESC[nG move the cursor, ESC[nP deletes, ESC[n@ inserts.
+# Colors, window titles, bracketed-paste toggles and other control codes are dropped. This is the
+# same overwrite behaviour as `col -b`, plus the erase/cursor sequences readline uses when it
+# redraws a line (tab completion, Ctrl-R, history recall). It cannot follow cursor-up redraws of
+# lines that wrap across several screen rows.
+read -r -d '' CLEAN_PL <<'PERL' || true
+use strict; use warnings; no warnings 'utf8';
+binmode(STDIN); binmode(STDOUT);
+while (my $line = <STDIN>) {
+    my $nl = ($line =~ s/\n\z//) ? "\n" : "";
+    my $utf8 = utf8::decode($line);          # stays as raw bytes if the line isn't valid UTF-8
+    my @b; my $p = 0;
+    pos($line) = 0;
+    while (pos($line) < length($line)) {
+        if ($line =~ /\G\e\[([0-9;?]*)[ -\/]*([\@-~])/gc) {
+            my ($arg, $fin) = ($1, $2);
+            my $n = ($arg =~ /^(\d+)/) ? $1 : undef;
+            if    ($fin eq 'K') {
+                my $m = $n // 0;
+                if    ($m == 0) { splice(@b, $p) if $p < @b }
+                elsif ($m == 1) { for my $i (0 .. $p - 1) { $b[$i] = ' ' if $i < @b } }
+                else            { @b = () }
+            }
+            elsif ($fin eq 'C') { $p += ($n || 1) }
+            elsif ($fin eq 'D') { $p -= ($n || 1); $p = 0 if $p < 0 }
+            elsif ($fin eq 'G') { $p = ($n || 1) - 1 }
+            elsif ($fin eq 'P') { splice(@b, $p, $n || 1) if $p < @b }
+            elsif ($fin eq '@') { push @b, ' ' while @b < $p; splice(@b, $p, 0, (' ') x ($n || 1)) }
+            elsif ($fin eq 'X') { for my $i ($p .. $p + ($n || 1) - 1) { $b[$i] = ' ' if $i < @b } }
+        }
+        elsif ($line =~ /\G\e\][^\a\e]*(?:\a|\e\\)/gc) { }
+        elsif ($line =~ /\G\e[()][0-9A-Za-z]/gc)         { }
+        elsif ($line =~ /\G\e.?/gcs)                     { }
+        elsif ($line =~ /\G\r/gc)                        { $p = 0 }
+        elsif ($line =~ /\G\x08/gc)                      { $p-- if $p > 0 }
+        elsif ($line =~ /\G[\x00-\x07\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/gc) { }
+        elsif ($line =~ /\G(.)/gcs) {
+            push @b, ' ' while @b < $p;
+            $b[$p++] = $1;
+        }
+    }
+    my $out = join('', map { defined $_ ? $_ : ' ' } @b);
+    $out =~ s/ +\z//;
+    utf8::encode($out) if $utf8;
+    print $out, $nl;
+}
+PERL
+
+# clean_log <raw>: print the raw log as plain text
 clean_log() {
   local raw="$1"
   [[ -s "$raw" ]] || return 0
   if command -v perl >/dev/null 2>&1; then
-    perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\e\][^\a\e]*(?:\a|\e\\)//g; s/\e[()][A-Za-z0-9]//g; s/\e[=>]//g; s/\r//g; 1 while s/[^\x08]\x08//; s/\x08//g;' "$raw"
+    perl -e "$CLEAN_PL" < "$raw"
   else
+    # no perl: just strip escapes and drop \r and backspaces (cruder, doesn't apply overwrites)
     sed -E 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][A-Za-z0-9]//g; s/\x1b[=>]//g' "$raw" \
       | tr -d '\r' | sed 's/.\x08//g; s/\x08//g'
   fi
@@ -91,15 +159,61 @@ list_boxes() {
   fi
 }
 
-# md_filelist <dir>: markdown bullet list of files under <dir>
+# files_by_mtime <dir> [find-args...]: relative file names under <dir>, oldest first
+files_by_mtime() {
+  local d="$1"; shift
+  find "$d" -type f "$@" -printf '%T@\t%P\n' 2>/dev/null | sort -n | cut -f2-
+}
+
+# ordered_screenshots <screenshots_dir>: image names in the order they were taken. Screenshots saved
+# with `shot` come first in captions.tsv order (the order they were captured); any other images
+# follow, oldest first.
+ordered_screenshots() {
+  local d="$1" f
+  local -A seen=()
+  if [[ -f "$d/captions.tsv" ]]; then
+    while IFS=$'\t' read -r f _; do
+      if [[ -n "$f" && -f "$d/$f" && -z "${seen[$f]:-}" ]]; then
+        seen[$f]=1
+        printf '%s\n' "$f"
+      fi
+    done < "$d/captions.tsv"
+  fi
+  while IFS= read -r f; do
+    if [[ -n "$f" && -z "${seen[$f]:-}" ]]; then
+      printf '%s\n' "$f"
+    fi
+  done < <(files_by_mtime "$d" \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' \))
+}
+
+# md_filelist <dir>: markdown bullet list of files under <dir>, oldest first
 md_filelist() {
   local out
-  out="$(find "$1" -type f -printf '%P\n' 2>/dev/null | sort)"
+  out="$(files_by_mtime "$1")"
   if [[ -n "$out" ]]; then
     sed 's/^/- /' <<<"$out"
   else
     echo "_none_"
   fi
+}
+
+# warn_secrets <box_dir> <path>...: warn if a password recorded in creds/creds.txt also appears in
+# the given files or folders (relative to the box). Passwords under 4 characters are skipped.
+warn_secrets() {
+  local dir="$1"; shift
+  local f="$dir/creds/creds.txt" line cred user pass hits
+  [[ -s "$f" ]] || return 0
+  while IFS= read -r line; do
+    cred="$(awk '{print $3}' <<<"$line")"
+    [[ "$cred" == *:* ]] || continue
+    user="${cred%%:*}"
+    pass="${cred#*:}"
+    [[ ${#pass} -ge 4 ]] || continue
+    hits="$(cd "$dir" && grep -rIlF -- "$pass" "$@" 2>/dev/null | paste -sd, || true)"
+    if [[ -n "$hits" ]]; then
+      echo "WARNING: the password recorded for '$user' also appears in: $hits"
+    fi
+  done < "$f"
 }
 
 # make_report <box_dir> <name> <with_creds 0|1>
@@ -137,13 +251,13 @@ make_report() {
     echo
     echo "## Nmap results"
     echo
-    out="$(find "$dir/nmap" -type f -name '*.nmap' 2>/dev/null | sort)"
+    out="$(files_by_mtime "$dir/nmap" -name '*.nmap')"       # oldest scan first
     if [[ -n "$out" ]]; then
       while IFS= read -r f; do
-        echo "### $(basename -- "$f")"
+        echo "### $f"
         echo
         printf '%s\n' '```'
-        cat "$f"
+        cat "$dir/nmap/$f"
         printf '%s\n' '```'
         echo
       done <<<"$out"
@@ -153,7 +267,7 @@ make_report() {
     fi
     echo "## Screenshots"
     echo
-    out="$(find "$dir/screenshots" -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' \) -printf '%P\n' 2>/dev/null | sort)"
+    out="$(ordered_screenshots "$dir/screenshots")"          # in the order they were taken
     if [[ -n "$out" ]]; then
       while IFS= read -r f; do
         cap="$(awk -F'\t' -v f="$f" '$1==f {print $2 "  -  " $3; exit}' "$dir/screenshots/captions.tsv" 2>/dev/null || true)"
@@ -185,7 +299,7 @@ make_report() {
       cat "$dir/creds/creds.txt"
       printf '%s\n' '```'
     elif [[ -s "$dir/creds/creds.txt" ]]; then
-      echo "_Not included. Re-run with \`mkbox -r --creds $name\` to include creds/creds.txt._"
+      echo "_creds/creds.txt is not inlined here (re-run with \`mkbox -r --creds $name\` to include it). Anything you typed into notes or the terminal is still part of this report and bundle._"
     else
       echo "_none recorded_"
     fi
@@ -207,7 +321,9 @@ make_report() {
   echo "Evidence:     $rdir/$name-evidence.tar.gz"
   echo "Included in tarball: ${items[*]}"
   if [[ "$with_creds" -eq 0 ]]; then
-    echo "(creds/ and loot/ were left out; use --creds to include creds)"
+    echo "Left out: the creds/ and loot/ folders (use --creds to include creds/)."
+    echo "That only covers those folders. Notes, exploits and the session log are bundled as typed."
+    warn_secrets "$dir" "${items[@]}"
   fi
 }
 
@@ -247,7 +363,7 @@ fi
 NAME="$(basename -- "$BOX_DIR")"
 
 [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "mkbox: box name must start with a letter/digit and contain only letters, digits, . _ -  (got: $NAME)" >&2; exit 1; }
-if [[ -n "$IP" && ! "$IP" =~ ^[A-Za-z0-9.:-]+$ ]]; then
+if [[ -n "$IP" && ! "$IP" =~ $IP_RE ]]; then
   echo "mkbox: that doesn't look like an IP/hostname: $IP" >&2
   exit 1
 fi
@@ -269,11 +385,10 @@ fi
 mkdir -p "$BOX_DIR"
 for d in "${SUBDIRS[@]}"; do mkdir -p "$BOX_DIR/$d"; done
 
-# --- target IP (kept in box.env so re-entering the box remembers it) ---
-if [[ -n "$IP" ]]; then
-  printf 'export IP=%q\n' "$IP" > "$BOX_DIR/box.env"
-elif [[ ! -f "$BOX_DIR/box.env" ]]; then
-  echo 'export IP=""' > "$BOX_DIR/box.env"
+# --- shared box state (IP, open ports) lives in box.env; every tab re-reads it at each prompt ---
+CUR_IP="$(env_get "$BOX_DIR" IP)"
+if [[ ! -f "$BOX_DIR/box.env" || ( -n "$IP" && "$IP" != "$CUR_IP" ) ]]; then
+  write_env "$BOX_DIR" "${IP:-$CUR_IP}" "$(env_get "$BOX_DIR" PORTS)" "$(env_get "$BOX_DIR" UDP_PORTS)"
 fi
 
 # --- notes template (only created once, never overwritten) ---
@@ -315,7 +430,11 @@ fi
 touch "$BOX_DIR/notes/timeline.md"
 
 # --- rc file for the logged shell (regenerated each run) ---
-cat > "$BOX_DIR/.box.rc" <<'EOF'
+# Written to a temp file and renamed into place, so a tab starting at this exact moment never reads
+# a half-written .box.rc.
+RC_TMP="$(mktemp "$BOX_DIR/.box.rc.XXXXXX")"
+trap 'rm -f "$RC_TMP"' EXIT
+cat > "$RC_TMP" <<'EOF'
 # Sourced by the mkbox shell
 [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 . "$BOX_DIR/box.env"
@@ -327,7 +446,18 @@ export HISTSIZE=100000
 export HISTFILESIZE=100000
 export HISTCONTROL=ignorespace   # a leading space keeps a command out of history
 shopt -s histappend
-PROMPT_COMMAND="history -a${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+
+# Shared state: re-read box.env before every prompt, so an IP/ports change made in another tab
+# (setip, portscan, udpscan) shows up here without restarting this shell.
+_boxsync() { [ -r "$BOX_DIR/box.env" ] && . "$BOX_DIR/box.env"; return 0; }
+_saveenv() {   # write IP / PORTS / UDP_PORTS to box.env atomically (temp file + rename)
+  local t
+  t="$(mktemp "$BOX_DIR/.box.env.XXXXXX")" || return 1
+  printf 'export IP=%q\nexport PORTS=%q\nexport UDP_PORTS=%q\n' "${IP:-}" "${PORTS:-}" "${UDP_PORTS:-}" > "$t"
+  chmod 644 "$t"
+  mv -f "$t" "$BOX_DIR/box.env"
+}
+PROMPT_COMMAND="history -a; _boxsync${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 
 PS1="\[\e[1;31m\][box:$BOX]\[\e[0m\] ${PS1:-\u@\h:\w\$ }"
 
@@ -342,6 +472,7 @@ boxinfo() {                                                                     
   echo "Target: ${IP:-<unset>}"
   echo "Dir:    $BOX_DIR"
   [ -n "${PORTS:-}" ] && echo "Ports:  $PORTS"
+  [ -n "${UDP_PORTS:-}" ] && echo "UDP:    $UDP_PORTS"
   printf 'Files:  '
   for d in nmap web loot exploits screenshots; do
     printf '%s=%s ' "$d" "$(find "$BOX_DIR/$d" -type f 2>/dev/null | wc -l)"
@@ -352,10 +483,15 @@ boxinfo() {                                                                     
   echo "Recent timeline:"
   tail -n 5 "$BOX_DIR/notes/timeline.md" | sed 's/^/  /'
 }
-setip() {                                                                                    # setip 10.10.10.4 (after a machinebo revert)
+setip() {                                                                                    # setip 10.10.10.4 (after a machine revert)
   [ -n "${1:-}" ] || { echo "usage: setip <ip>"; return 1; }
-  printf 'export IP=%q\n' "$1" > "$BOX_DIR/box.env"
-  export IP="$1"
+  if ! [[ "$1" =~ $MKBOX_IP_RE ]]; then                    # same check mkbox itself applies
+    echo "setip: that doesn't look like an IP/hostname: $1"
+    return 1
+  fi
+  _boxsync
+  IP="$1"; export IP
+  _saveenv                                                 # other tabs pick this up at their next prompt
   sed -i "s|^- \\*\\*Target:\\*\\* .*|- **Target:** $IP|" "$BOX_DIR/notes/notes.md"   # keep the notes header in sync
   note "target IP set to $IP"
   echo "IP=$IP"
@@ -365,10 +501,22 @@ setip() {                                                                       
 portscan() {                                                                                 # all TCP ports -> nmap/allports.*, sets $PORTS
   [ -n "${IP:-}" ] || { echo "IP not set (use: setip <ip>)"; return 1; }
   _sudo nmap -p- --min-rate 2000 -T4 -oA "$BOX_DIR/nmap/allports" "$IP" || return
-  PORTS="$(grep -oE '[0-9]+/open' "$BOX_DIR/nmap/allports.gnmap" | cut -d/ -f1 | sort -un | paste -sd,)"
-  export PORTS
+  local found
+  found="$(grep -oE '[0-9]+/open/tcp' "$BOX_DIR/nmap/allports.gnmap" | cut -d/ -f1 | sort -un | paste -sd,)"
+  _boxsync; PORTS="$found"; export PORTS; _saveenv         # shared with the other tabs
   note "portscan: open ports ${PORTS:-none}"
   echo "Open ports: ${PORTS:-none}"
+}
+udpscan() {                                                                                  # udpscan [N] -> top-N UDP ports + version detection
+  local n="${1:-20}" found
+  case "$n" in ''|*[!0-9]*) echo "usage: udpscan [number-of-top-ports]"; return 1 ;; esac
+  [ -n "${IP:-}" ] || { echo "IP not set (use: setip <ip>)"; return 1; }
+  echo "UDP scans are slow (minutes). Consider running this in a second tab."
+  _sudo nmap -sU -sV --top-ports "$n" --open -oA "$BOX_DIR/nmap/udp" "$IP" || return
+  found="$(grep -oE '[0-9]+/open/udp' "$BOX_DIR/nmap/udp.gnmap" | cut -d/ -f1 | sort -un | paste -sd,)"
+  _boxsync; UDP_PORTS="$found"; export UDP_PORTS; _saveenv
+  note "udpscan top $n: open UDP ports ${UDP_PORTS:-none}"
+  echo "Open UDP ports: ${UDP_PORTS:-none}"
 }
 svcscan() {                                                                                  # svcscan [ports] -> default scripts + versions
   local p="${1:-${PORTS:-}}"
@@ -429,10 +577,12 @@ report()   { "$MKBOX_BIN" -r "$@" "$BOX_DIR"; }                                 
 echo "Box:    $BOX"
 echo "Target: \$IP=${IP:-<unset>}"
 echo "Dir:    $BOX_DIR"
-echo "Helpers: note shot boxinfo boxcd setip portscan svcscan serve addcred proofcmd cleanlog report"
+echo "Helpers: note shot boxinfo boxcd setip portscan udpscan svcscan serve addcred proofcmd cleanlog report"
 EOF
+chmod 644 "$RC_TMP"
+mv -f "$RC_TMP" "$BOX_DIR/.box.rc"
 
-export BOX="$NAME" BOX_DIR MKBOX_BIN="$(readlink -f -- "$0")"
+export BOX="$NAME" BOX_DIR MKBOX_BIN="$(readlink -f -- "$0")" MKBOX_IP_RE="$IP_RE"
 
 if [[ "$NO_SHELL" -eq 1 ]]; then
   echo "Created $BOX_DIR"
