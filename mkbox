@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+# mkbox - create (or re-enter) a per-box workspace and drop into a logged shell.
+#
+# Usage:  mkbox [-n|--no-shell] <boxname|path> [target-ip]
+#         mkbox -c|--clean  <boxname|path>          rebuild the cleaned session log
+#         mkbox -r|--report [--creds] <boxname|path> build a report draft + evidence tarball
+#         mkbox -l|--list                            list boxes in the current directory
+#
+# The box is created in the CURRENT directory:
+#   mkbox lame 10.10.10.3     -> ./lame
+#   mkbox .                   -> use the current directory as the box
+#   mkbox ~/labs/htb/lame     -> any path works; the last component is the box name
+#
+# Logs:   session-<name>.log        cleaned (no escape codes), regenerated on exit
+#         .session-<name>.raw       raw `script` output, appended across sessions
+
+set -euo pipefail
+
+SUBDIRS=(nmap web loot exploits creds notes screenshots transfer)
+
+usage() {
+  cat >&2 <<'U'
+Usage: mkbox [-n|--no-shell] <boxname|path> [target-ip]
+       mkbox -c|--clean  <boxname|path>
+       mkbox -r|--report [--creds] <boxname|path>
+       mkbox -l|--list
+U
+  exit "${1:-1}"
+}
+
+# clean_log <raw> <out>: strip ANSI/OSC escapes, carriage returns and backspaces
+clean_log() {
+  local raw="$1" out="$2"
+  [[ -s "$raw" ]] || return 0
+  if command -v perl >/dev/null 2>&1; then
+    perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\e\][^\a\e]*(?:\a|\e\\)//g; s/\e[()][A-Za-z0-9]//g; s/\e[=>]//g; s/\r//g; 1 while s/[^\x08]\x08//; s/\x08//g;' "$raw" > "$out"
+  else
+    sed -E 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][A-Za-z0-9]//g; s/\x1b[=>]//g' "$raw" \
+      | tr -d '\r' | sed 's/.\x08//g; s/\x08//g' > "$out"
+  fi
+}
+
+# list_boxes: show every box (directory containing box.env) under the current directory
+list_boxes() {
+  local found=0 d n ip done_count
+  printf '%-26s %-18s %s\n' "BOX" "TARGET" "PROOF"
+  for d in "$PWD"/*/; do
+    [[ -f "${d}box.env" ]] || continue
+    found=1
+    n="$(basename -- "$d")"
+    ip="$(. "${d}box.env"; echo "${IP:-}")"
+    done_count="$(grep -cE '^- \[[xX]\] (local|proof)\.txt' "${d}notes/notes.md" 2>/dev/null || true)"
+    printf '%-26s %-18s %s/2\n' "$n" "${ip:--}" "${done_count:-0}"
+  done
+  if [[ "$found" -eq 0 ]]; then
+    echo "No boxes found in $PWD"
+  fi
+}
+
+# md_filelist <dir>: markdown bullet list of files under <dir>
+md_filelist() {
+  local out
+  out="$(find "$1" -type f -printf '%P\n' 2>/dev/null | sort)"
+  if [[ -n "$out" ]]; then
+    sed 's/^/- /' <<<"$out"
+  else
+    echo "_none_"
+  fi
+}
+
+# make_report <box_dir> <name> <with_creds 0|1>
+make_report() {
+  local dir="$1" name="$2" with_creds="$3"
+  local rdir="$dir/report" md ip f out
+  [[ -f "$dir/box.env" ]] || { echo "mkbox: $dir is not a box (no box.env)" >&2; exit 1; }
+
+  mkdir -p "$rdir"
+  md="$rdir/$name-report.md"
+  ip="$(. "$dir/box.env"; echo "${IP:-}")"
+
+  # make sure the cleaned log is current
+  if [[ -s "$dir/.session-$name.raw" ]]; then
+    clean_log "$dir/.session-$name.raw" "$dir/session-$name.log"
+  fi
+
+  {
+    echo "# $name - report draft"
+    echo
+    echo "- **Target:** ${ip:-unknown}"
+    echo "- **Generated:** $(date '+%F %T')"
+    echo
+    echo "## Notes"
+    echo
+    sed '1{/^# /d}' "$dir/notes/notes.md"
+    echo
+    echo "## Timeline"
+    echo
+    if [[ -s "$dir/notes/timeline.md" ]]; then
+      printf '%s\n' '```'
+      cat "$dir/notes/timeline.md"
+      printf '%s\n' '```'
+    else
+      echo "_none_"
+    fi
+    echo
+    echo "## Nmap results"
+    echo
+    out="$(find "$dir/nmap" -type f -name '*.nmap' 2>/dev/null | sort)"
+    if [[ -n "$out" ]]; then
+      while IFS= read -r f; do
+        echo "### $(basename -- "$f")"
+        echo
+        printf '%s\n' '```'
+        cat "$f"
+        printf '%s\n' '```'
+        echo
+      done <<<"$out"
+    else
+      echo "_none_"
+      echo
+    fi
+    echo "## Screenshots"
+    echo
+    out="$(find "$dir/screenshots" -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' \) -printf '%P\n' 2>/dev/null | sort)"
+    if [[ -n "$out" ]]; then
+      while IFS= read -r f; do
+        echo "**$f**"
+        echo
+        echo "![$f](../screenshots/$f)"
+        echo
+      done <<<"$out"
+    else
+      echo "_none_"
+      echo
+    fi
+    echo "## Exploits / scripts"
+    echo
+    md_filelist "$dir/exploits"
+    echo
+    echo "## Loot (filenames only)"
+    echo
+    md_filelist "$dir/loot"
+    echo
+    echo "## Credentials"
+    echo
+    if [[ "$with_creds" -eq 1 && -s "$dir/creds/creds.txt" ]]; then
+      printf '%s\n' '```'
+      cat "$dir/creds/creds.txt"
+      printf '%s\n' '```'
+    elif [[ -s "$dir/creds/creds.txt" ]]; then
+      echo "_Not included. Re-run with \`mkbox -r --creds $name\` to include creds/creds.txt._"
+    else
+      echo "_none recorded_"
+    fi
+  } > "$md"
+
+  # evidence tarball: only things that exist
+  local items=() p
+  for p in notes screenshots nmap exploits web "session-$name.log" "report/$name-report.md"; do
+    if [[ -e "$dir/$p" ]]; then
+      items+=("$p")
+    fi
+  done
+  if [[ "$with_creds" -eq 1 && -d "$dir/creds" ]]; then
+    items+=("creds")
+  fi
+  tar -czf "$rdir/$name-evidence.tar.gz" -C "$dir" "${items[@]}"
+
+  echo "Report draft: $md"
+  echo "Evidence:     $rdir/$name-evidence.tar.gz"
+  echo "Included in tarball: ${items[*]}"
+  if [[ "$with_creds" -eq 0 ]]; then
+    echo "(creds/ and loot/ were left out; use --creds to include creds)"
+  fi
+}
+
+MODE=run
+NO_SHELL=0
+WITH_CREDS=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n|--no-shell) NO_SHELL=1 ;;
+    -c|--clean)    MODE=clean ;;
+    -r|--report)   MODE=report ;;
+    -l|--list)     MODE=list ;;
+    --creds)       WITH_CREDS=1 ;;
+    -h|--help)     usage 0 ;;
+    --)            shift; break ;;
+    -*)            echo "mkbox: unknown option $1" >&2; usage 1 ;;
+    *)             break ;;
+  esac
+  shift
+done
+
+if [[ "$MODE" == "list" ]]; then
+  list_boxes
+  exit 0
+fi
+
+TARGET="${1:-}"
+IP="${2:-}"
+[[ -n "$TARGET" ]] || usage 1
+
+# Resolve the box directory relative to where mkbox was run
+if [[ "$TARGET" == "." || "$TARGET" == */* ]]; then
+  BOX_DIR="$(realpath -m -- "$TARGET")"
+else
+  BOX_DIR="$PWD/$TARGET"
+fi
+NAME="$(basename -- "$BOX_DIR")"
+
+[[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "mkbox: box name must start with a letter/digit and contain only letters, digits, . _ -  (got: $NAME)" >&2; exit 1; }
+if [[ -n "$IP" && ! "$IP" =~ ^[A-Za-z0-9.:-]+$ ]]; then
+  echo "mkbox: that doesn't look like an IP/hostname: $IP" >&2
+  exit 1
+fi
+
+RAW="$BOX_DIR/.session-$NAME.raw"
+LOG="$BOX_DIR/session-$NAME.log"
+
+if [[ "$MODE" == "clean" ]]; then
+  [[ -f "$RAW" ]] || { echo "mkbox: no raw log at $RAW" >&2; exit 1; }
+  clean_log "$RAW" "$LOG"
+  echo "Cleaned log: $LOG"
+  exit 0
+fi
+
+if [[ "$MODE" == "report" ]]; then
+  make_report "$BOX_DIR" "$NAME" "$WITH_CREDS"
+  exit 0
+fi
+
+mkdir -p "$BOX_DIR"
+for d in "${SUBDIRS[@]}"; do mkdir -p "$BOX_DIR/$d"; done
+
+# --- target IP (kept in box.env so re-entering the box remembers it) ---
+if [[ -n "$IP" ]]; then
+  printf 'export IP=%q\n' "$IP" > "$BOX_DIR/box.env"
+elif [[ ! -f "$BOX_DIR/box.env" ]]; then
+  echo 'export IP=""' > "$BOX_DIR/box.env"
+fi
+
+# --- notes template (only created once, never overwritten) ---
+if [[ ! -f "$BOX_DIR/notes/notes.md" ]]; then
+  cat > "$BOX_DIR/notes/notes.md" <<EOF
+# $NAME
+
+- **Target:** ${IP:-TBD}
+- **Started:** $(date '+%F %T')
+
+## Ports / Services
+| Port | Service | Version | Notes |
+|------|---------|---------|-------|
+|      |         |         |       |
+
+## Foothold
+-
+
+## Privilege Escalation
+-
+
+## Creds / Users
+-
+
+## Proof
+- [ ] local.txt:
+- [ ] proof.txt:
+
+## Rabbit holes (what I tried that didn't work)
+-
+EOF
+fi
+touch "$BOX_DIR/notes/timeline.md"
+
+# --- rc file for the logged shell (regenerated each run) ---
+cat > "$BOX_DIR/.box.rc" <<'EOF'
+# Sourced by the mkbox shell
+[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+. "$BOX_DIR/box.env"
+
+# Per-box history with timestamps, written after every command
+export HISTFILE="$BOX_DIR/.bash_history_$BOX"
+export HISTTIMEFORMAT="%F %T "
+export HISTSIZE=100000
+export HISTFILESIZE=100000
+export HISTCONTROL=ignorespace   # a leading space keeps a command out of history
+shopt -s histappend
+PROMPT_COMMAND="history -a${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+
+PS1="\[\e[1;31m\][box:$BOX]\[\e[0m\] ${PS1:-\u@\h:\w\$ }"
+
+# ---------------------------------------------------------------- helpers
+_sudo() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi; }
+
+# --- notes & navigation
+note()     { printf '%s  %s\n' "$(date '+%F %T')" "$*" >> "$BOX_DIR/notes/timeline.md"; }   # note "got creds for bob"
+boxcd()    { cd "$BOX_DIR/${1:-}"; }                                                         # boxcd nmap
+boxinfo() {                                                                                  # status overview
+  echo "Box:    $BOX"
+  echo "Target: ${IP:-<unset>}"
+  echo "Dir:    $BOX_DIR"
+  [ -n "${PORTS:-}" ] && echo "Ports:  $PORTS"
+  printf 'Files:  '
+  for d in nmap web loot exploits screenshots; do
+    printf '%s=%s ' "$d" "$(find "$BOX_DIR/$d" -type f 2>/dev/null | wc -l)"
+  done
+  echo
+  echo "Proof:"
+  grep -E '^- \[.\] (local|proof)\.txt' "$BOX_DIR/notes/notes.md" | sed 's/^/  /'
+  echo "Recent timeline:"
+  tail -n 5 "$BOX_DIR/notes/timeline.md" | sed 's/^/  /'
+}
+setip() {                                                                                    # setip 10.10.10.4 (after a machine revert)
+  [ -n "${1:-}" ] || { echo "usage: setip <ip>"; return 1; }
+  printf 'export IP=%q\n' "$1" > "$BOX_DIR/box.env"
+  export IP="$1"
+  sed -i "s|^- \\*\\*Target:\\*\\* .*|- **Target:** $IP|" "$BOX_DIR/notes/notes.md"   # keep the notes header in sync
+  note "target IP set to $IP"
+  echo "IP=$IP"
+}
+
+# --- recon wrappers (plain nmap with fixed flags; output goes to nmap/)
+portscan() {                                                                                 # all TCP ports -> nmap/allports.*, sets $PORTS
+  [ -n "${IP:-}" ] || { echo "IP not set (use: setip <ip>)"; return 1; }
+  _sudo nmap -p- --min-rate 2000 -T4 -oA "$BOX_DIR/nmap/allports" "$IP" || return
+  PORTS="$(grep -oE '[0-9]+/open' "$BOX_DIR/nmap/allports.gnmap" | cut -d/ -f1 | sort -un | paste -sd,)"
+  export PORTS
+  note "portscan: open ports ${PORTS:-none}"
+  echo "Open ports: ${PORTS:-none}"
+}
+svcscan() {                                                                                  # svcscan [ports] -> default scripts + versions
+  local p="${1:-${PORTS:-}}"
+  [ -n "${IP:-}" ] || { echo "IP not set (use: setip <ip>)"; return 1; }
+  [ -n "$p" ] || { echo "no ports: run portscan first, or: svcscan 22,80"; return 1; }
+  _sudo nmap -sC -sV -p "$p" -oA "$BOX_DIR/nmap/services" "$IP" && note "svcscan on ports $p"
+}
+
+# --- file transfer
+serve() { ( cd "$BOX_DIR/transfer" && python3 -m http.server "${1:-80}" ); }                 # serve [port]  (serves transfer/)
+
+# --- creds & proof
+addcred() {                                                                                  # addcred user:pass [where found]
+  [ $# -ge 1 ] || { echo 'usage: addcred user:pass [where found / service]'; return 1; }
+  local f="$BOX_DIR/creds/creds.txt" c="$1"; shift
+  [ -f "$f" ] || ( umask 077; : > "$f" )
+  printf '%s  %s  (%s)\n' "$(date '+%F %T')" "$c" "${*:-no source noted}" >> "$f"
+  note "cred recorded for ${c%%:*} (${*:-no source noted})"      # timeline gets the username only, never the password
+}
+proofcmd() {                                                                                 # prints proof one-liners to paste on the target
+  cat <<'P'
+Linux:    cat /root/proof.txt; whoami; hostname; ip a
+          cat /home/<user>/local.txt; whoami; hostname; ip a
+Windows:  type C:\Users\Administrator\Desktop\proof.txt & whoami & hostname & ipconfig
+P
+}
+
+# --- logs & reporting
+cleanlog() { "$MKBOX_BIN" -c "$BOX_DIR"; }                                                   # refresh the cleaned log mid-session
+report()   { "$MKBOX_BIN" -r "$@" "$BOX_DIR"; }                                              # report [--creds]
+
+echo "Box:    $BOX"
+echo "Target: \$IP=${IP:-<unset>}"
+echo "Dir:    $BOX_DIR"
+echo "Helpers: note boxinfo boxcd setip portscan svcscan serve addcred proofcmd cleanlog report"
+EOF
+
+export BOX="$NAME" BOX_DIR MKBOX_BIN="$(readlink -f -- "$0")"
+
+if [[ "$NO_SHELL" -eq 1 ]]; then
+  echo "Created $BOX_DIR"
+  exit 0
+fi
+
+cd "$BOX_DIR"
+printf -v SHELL_CMD 'bash --rcfile %q -i' "$BOX_DIR/.box.rc"
+
+# script -a appends, -f flushes after every write (safe if the VM/laptop dies), -q hides the banner.
+# Not exec'd: we need to regain control afterwards to clean the log.
+set +e
+script -q -f -a "$RAW" -c "$SHELL_CMD"
+set -e
+
+clean_log "$RAW" "$LOG"
+echo "Session log: $LOG"
