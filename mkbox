@@ -11,8 +11,10 @@
 #   mkbox .                   -> use the current directory as the box
 #   mkbox ~/labs/htb/lame     -> any path works; the last component is the box name
 #
-# Logs:   session-<name>.log        cleaned (no escape codes), regenerated on exit
-#         .session-<name>.raw       raw `script` output, appended across sessions
+# Logs:   session-<name>.log        cleaned (no escape codes), regenerated on exit; one
+#                                   labeled section per session/tab, in start order
+#         .sessions/<start>-<pid>.raw   raw `script` output, one file per mkbox invocation
+#                                   (so several tabs can be open on the same box safely)
 
 set -euo pipefail
 
@@ -28,16 +30,48 @@ U
   exit "${1:-1}"
 }
 
-# clean_log <raw> <out>: strip ANSI/OSC escapes, carriage returns and backspaces
+# clean_log <raw>: print the raw log with ANSI/OSC escapes, carriage returns and backspaces removed
 clean_log() {
-  local raw="$1" out="$2"
+  local raw="$1"
   [[ -s "$raw" ]] || return 0
   if command -v perl >/dev/null 2>&1; then
-    perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\e\][^\a\e]*(?:\a|\e\\)//g; s/\e[()][A-Za-z0-9]//g; s/\e[=>]//g; s/\r//g; 1 while s/[^\x08]\x08//; s/\x08//g;' "$raw" > "$out"
+    perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\e\][^\a\e]*(?:\a|\e\\)//g; s/\e[()][A-Za-z0-9]//g; s/\e[=>]//g; s/\r//g; 1 while s/[^\x08]\x08//; s/\x08//g;' "$raw"
   else
     sed -E 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][A-Za-z0-9]//g; s/\x1b[=>]//g' "$raw" \
-      | tr -d '\r' | sed 's/.\x08//g; s/\x08//g' > "$out"
+      | tr -d '\r' | sed 's/.\x08//g; s/\x08//g'
   fi
+}
+
+# build_log <box_dir> <name>: rebuild session-<name>.log from every raw session log,
+# oldest first, each under a "===== session <start time> =====" header
+build_log() {
+  local dir="$1" name="$2" f b tmp
+  local files=()
+  if [[ -s "$dir/.session-$name.raw" ]]; then      # single-file layout from earlier versions
+    files+=("$dir/.session-$name.raw")
+  fi
+  shopt -s nullglob
+  for f in "$dir"/.sessions/*.raw; do
+    if [[ -s "$f" ]]; then
+      files+=("$f")
+    fi
+  done
+  shopt -u nullglob
+  [[ ${#files[@]} -gt 0 ]] || return 0
+
+  tmp="$(mktemp)"
+  for f in "${files[@]}"; do
+    b="$(basename -- "$f" .raw)"
+    if [[ "$b" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})-([0-9]{2})([0-9]{2})([0-9]{2}) ]]; then
+      printf '===== session %s-%s-%s %s:%s:%s =====\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}" "${BASH_REMATCH[6]}"
+    else
+      printf '===== earlier session =====\n'
+    fi
+    clean_log "$f"
+    echo
+  done > "$tmp"
+  chmod 644 "$tmp"
+  mv "$tmp" "$dir/session-$name.log"
 }
 
 # list_boxes: show every box (directory containing box.env) under the current directory
@@ -79,9 +113,7 @@ make_report() {
   ip="$(. "$dir/box.env"; echo "${IP:-}")"
 
   # make sure the cleaned log is current
-  if [[ -s "$dir/.session-$name.raw" ]]; then
-    clean_log "$dir/.session-$name.raw" "$dir/session-$name.log"
-  fi
+  build_log "$dir" "$name"
 
   {
     echo "# $name - report draft"
@@ -220,12 +252,11 @@ if [[ -n "$IP" && ! "$IP" =~ ^[A-Za-z0-9.:-]+$ ]]; then
   exit 1
 fi
 
-RAW="$BOX_DIR/.session-$NAME.raw"
 LOG="$BOX_DIR/session-$NAME.log"
 
 if [[ "$MODE" == "clean" ]]; then
-  [[ -f "$RAW" ]] || { echo "mkbox: no raw log at $RAW" >&2; exit 1; }
-  clean_log "$RAW" "$LOG"
+  build_log "$BOX_DIR" "$NAME"
+  [[ -f "$LOG" ]] || { echo "mkbox: no session logs found for $NAME" >&2; exit 1; }
   echo "Cleaned log: $LOG"
   exit 0
 fi
@@ -273,6 +304,12 @@ if [[ ! -f "$BOX_DIR/notes/notes.md" ]]; then
 
 ## Rabbit holes (what I tried that didn't work)
 -
+
+## Lessons learned
+- **Key vulnerability / technique:**
+- **What I missed or got stuck on (and why):**
+- **What I'd do faster next time:**
+- **To practice / memorize:**
 EOF
 fi
 touch "$BOX_DIR/notes/timeline.md"
@@ -315,7 +352,7 @@ boxinfo() {                                                                     
   echo "Recent timeline:"
   tail -n 5 "$BOX_DIR/notes/timeline.md" | sed 's/^/  /'
 }
-setip() {                                                                                    # setip 10.10.10.4 (after a machine revert)
+setip() {                                                                                    # setip 10.10.10.4 (after a machinebo revert)
   [ -n "${1:-}" ] || { echo "usage: setip <ip>"; return 1; }
   printf 'export IP=%q\n' "$1" > "$BOX_DIR/box.env"
   export IP="$1"
@@ -405,11 +442,15 @@ fi
 cd "$BOX_DIR"
 printf -v SHELL_CMD 'bash --rcfile %q -i' "$BOX_DIR/.box.rc"
 
-# script -a appends, -f flushes after every write (safe if the VM/laptop dies), -q hides the banner.
+# One raw log per invocation, so a second tab on the same box never writes into this one.
+mkdir -p "$BOX_DIR/.sessions"
+RAW="$BOX_DIR/.sessions/$(date '+%Y%m%d-%H%M%S')-$$.raw"
+
+# script -f flushes after every write (safe if the VM/laptop dies), -q hides the banner.
 # Not exec'd: we need to regain control afterwards to clean the log.
 set +e
-script -q -f -a "$RAW" -c "$SHELL_CMD"
+script -q -f "$RAW" -c "$SHELL_CMD"
 set -e
 
-clean_log "$RAW" "$LOG"
+build_log "$BOX_DIR" "$NAME"
 echo "Session log: $LOG"
