@@ -71,7 +71,7 @@ md_filelist() {
 # make_report <box_dir> <name> <with_creds 0|1>
 make_report() {
   local dir="$1" name="$2" with_creds="$3"
-  local rdir="$dir/report" md ip f out
+  local rdir="$dir/report" md ip f out cap
   [[ -f "$dir/box.env" ]] || { echo "mkbox: $dir is not a box (no box.env)" >&2; exit 1; }
 
   mkdir -p "$rdir"
@@ -124,10 +124,15 @@ make_report() {
     out="$(find "$dir/screenshots" -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' \) -printf '%P\n' 2>/dev/null | sort)"
     if [[ -n "$out" ]]; then
       while IFS= read -r f; do
+        cap="$(awk -F'\t' -v f="$f" '$1==f {print $2 "  -  " $3; exit}' "$dir/screenshots/captions.tsv" 2>/dev/null || true)"
         echo "**$f**"
         echo
-        echo "![$f](../screenshots/$f)"
+        echo "![$f](../screenshots/${f// /%20})"
         echo
+        if [[ -n "$cap" ]]; then
+          echo "_${cap}_"
+          echo
+        fi
       done <<<"$out"
     else
       echo "_none_"
@@ -335,6 +340,32 @@ svcscan() {                                                                     
   _sudo nmap -sC -sV -p "$p" -oA "$BOX_DIR/nmap/services" "$IP" && note "svcscan on ports $p"
 }
 
+# --- screenshots (from the clipboard)
+shot() {                                                                                     # shot "what this shows" -> saves the clipboard image
+  local msg="${*:-screenshot}" ts slug f n=1 tmp
+  msg="${msg//$'\t'/ }"
+  ts="$(date '+%Y%m%d-%H%M%S')"
+  slug="$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//' | cut -c1-40)"
+  f="$ts-${slug:-screenshot}.png"
+  while [ -e "$BOX_DIR/screenshots/$f" ]; do n=$((n+1)); f="$ts-${slug:-screenshot}-$n.png"; done
+  tmp="$(mktemp)"
+  if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-paste >/dev/null 2>&1; then
+    wl-paste --type image/png > "$tmp" 2>/dev/null
+  elif command -v xclip >/dev/null 2>&1; then
+    xclip -selection clipboard -t image/png -o > "$tmp" 2>/dev/null
+  else
+    rm -f "$tmp"; echo "shot: need xclip (X11) or wl-clipboard (Wayland):  sudo apt install xclip"; return 1
+  fi
+  if [ "$(head -c 8 "$tmp" 2>/dev/null | od -An -tx1 | tr -d ' \n')" != "89504e470d0a1a0a" ]; then
+    rm -f "$tmp"; echo "shot: no PNG image on the clipboard (copy the screenshot first)"; return 1
+  fi
+  chmod 644 "$tmp"
+  mv "$tmp" "$BOX_DIR/screenshots/$f"
+  printf '%s\t%s\t%s\n' "$f" "$(date '+%F %T')" "$msg" >> "$BOX_DIR/screenshots/captions.tsv"
+  note "screenshot $f - $msg"
+  echo "saved screenshots/$f"
+}
+
 # --- file transfer
 serve() { ( cd "$BOX_DIR/transfer" && python3 -m http.server "${1:-80}" ); }                 # serve [port]  (serves transfer/)
 
@@ -361,7 +392,7 @@ report()   { "$MKBOX_BIN" -r "$@" "$BOX_DIR"; }                                 
 echo "Box:    $BOX"
 echo "Target: \$IP=${IP:-<unset>}"
 echo "Dir:    $BOX_DIR"
-echo "Helpers: note boxinfo boxcd setip portscan svcscan serve addcred proofcmd cleanlog report"
+echo "Helpers: note shot boxinfo boxcd setip portscan svcscan serve addcred proofcmd cleanlog report"
 EOF
 
 export BOX="$NAME" BOX_DIR MKBOX_BIN="$(readlink -f -- "$0")"
