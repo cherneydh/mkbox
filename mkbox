@@ -11,6 +11,9 @@
 #   mkbox .                   -> use the current directory as the box
 #   mkbox ~/labs/htb/lame     -> any path works; the last component is the box name
 #
+# Reports (-r) merge your shell history, timeline notes and screenshot captions into one
+# chronological log (GNU date required); `addcred` commands are shown with the password masked.
+#
 # Logs:   session-<name>.log        cleaned (no escape codes), regenerated on exit; one
 #                                   labeled section per session/tab, in start order
 #         .sessions/<start>-<pid>.raw   raw `script` output, one file per mkbox invocation
@@ -19,7 +22,9 @@
 set -euo pipefail
 
 SUBDIRS=(nmap web loot exploits creds notes screenshots transfer)
-IP_RE='^[A-Za-z0-9.:-]+$'      # accepted target IP/hostname; also exported to the box shell for `setip`
+# Accepted target IP/hostname; also exported to the box shell for `setip`. It must not start with
+# "-" so a value like "-sV" can never be mistaken for an nmap option later.
+IP_RE='^[A-Za-z0-9:][A-Za-z0-9.:-]*$'
 
 # env_get <box_dir> <VAR>: read one variable from box.env ("" if unset or the file is missing)
 env_get() {
@@ -186,6 +191,79 @@ ordered_screenshots() {
   done < <(files_by_mtime "$d" \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' \))
 }
 
+# chrono_log <box_dir> <name>: markdown chronological log. Merges shell history (commands), timeline
+# notes and screenshot captions by time. Commands run in a code block; notes and screenshots are
+# bullets. Prints nothing if there is nothing to merge. Needs GNU date.
+#   - trivial commands (ls, cd, pwd, clear, history, exit, note, shot, ...) are left out
+#   - `addcred user:pass ...` is shown as `addcred user:***` so passwords never reach the report
+chrono_log() {
+  local dir="$1" name="$2" t hist="$dir/.bash_history_$2" tl="$dir/notes/timeline.md" cap="$dir/screenshots/captions.tsv"
+  t="$(mktemp -d)"
+
+  # commands: "<epoch>\tC\t<command>"  (multi-line commands are joined with \036)
+  if [[ -s "$hist" ]]; then
+    awk '
+      function flush() {
+        if (cmd == "") return
+        if (cmd ~ /^[ \t]*(ls|ll|la|cd|pwd|clear|history|exit|logout|boxinfo|boxcd|note|shot|cleanlog|proofcmd|report)([ \t]|$)/) { cmd = ""; return }
+        if (match(cmd, /^addcred +[^: ]+:/)) cmd = substr(cmd, 1, RLENGTH) "***"
+        printf "%s\tC\t%s\n", ep, cmd
+        cmd = ""
+      }
+      /^#[0-9]+$/ { flush(); ep = substr($0, 2); next }
+      { if (ep == "") next; cmd = (cmd == "" ? $0 : cmd "\036" $0) }
+      END { flush() }
+    ' "$hist" > "$t/c.tsv" || true
+  fi
+
+  # timeline notes: "<epoch>\tN\t<text>"; screenshot lines are skipped (captions.tsv covers them)
+  if [[ -s "$tl" ]]; then
+    grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}  ' "$tl" 2>/dev/null \
+      | grep -vE '^.{21}screenshot ' > "$t/n.txt" || true
+    if [[ -s "$t/n.txt" ]]; then
+      cut -c1-19 "$t/n.txt" | date -f - +%s 2>/dev/null > "$t/n.ep" || true
+      cut -c22- "$t/n.txt" > "$t/n.tx"
+      if [[ "$(wc -l < "$t/n.ep")" -eq "$(wc -l < "$t/n.tx")" ]]; then
+        paste -d '\t' "$t/n.ep" <(sed 's/^/N\t/' "$t/n.tx") > "$t/n.tsv"
+      fi
+    fi
+  fi
+
+  # screenshots: "<epoch>\tS\t<file>\t<caption>"
+  if [[ -s "$cap" ]]; then
+    cut -f2 "$cap" | date -f - +%s 2>/dev/null > "$t/s.ep" || true
+    if [[ "$(wc -l < "$t/s.ep")" -eq "$(wc -l < "$cap")" ]]; then
+      paste -d '\t' "$t/s.ep" <(awk -F'\t' '{printf "S\t%s\t%s\n", $1, $3}' "$cap") > "$t/s.tsv"
+    fi
+  fi
+
+  cat "$t"/c.tsv "$t"/n.tsv "$t"/s.tsv 2>/dev/null | sort -s -t $'\t' -k1,1n > "$t/all.tsv" || true
+  if [[ -s "$t/all.tsv" ]]; then
+    sed 's/\t.*//; s/^/@/' "$t/all.tsv" | date -f - '+%F %T' 2>/dev/null > "$t/when.txt" || true
+    if [[ "$(wc -l < "$t/when.txt")" -eq "$(wc -l < "$t/all.tsv")" ]]; then
+      paste -d '\t' "$t/when.txt" "$t/all.tsv" | awk -F'\t' '
+        function close_block() { if (inblock) { print "```"; print ""; inblock = 0 } }
+        {
+          when = $1; kind = $3
+          text = $0; sub(/^[^\t]*\t[^\t]*\t[^\t]*\t/, "", text)
+          if (kind == "C") {
+            if (!inblock) { if (bullet) print ""; print "```"; inblock = 1; bullet = 0 }
+            gsub(/\036/, "\n    ", text)
+            printf "[%s] $ %s\n", when, text
+          } else if (kind == "N") {
+            close_block(); printf "- **%s** - %s\n", when, text; bullet = 1
+          } else if (kind == "S") {
+            close_block()
+            n = index(text, "\t"); file = substr(text, 1, n - 1); c = substr(text, n + 1)
+            printf "- **%s** - screenshot `%s`: %s\n", when, file, c; bullet = 1
+          }
+        }
+        END { close_block() }'
+    fi
+  fi
+  rm -rf "$t"
+}
+
 # md_filelist <dir>: markdown bullet list of files under <dir>, oldest first
 md_filelist() {
   local out
@@ -241,7 +319,10 @@ make_report() {
     echo
     echo "## Timeline"
     echo
-    if [[ -s "$dir/notes/timeline.md" ]]; then
+    out="$(chrono_log "$dir" "$name")"                        # commands + notes + screenshots, by time
+    if [[ -n "$out" ]]; then
+      printf '%s\n' "$out"
+    elif [[ -s "$dir/notes/timeline.md" ]]; then
       printf '%s\n' '```'
       cat "$dir/notes/timeline.md"
       printf '%s\n' '```'
@@ -498,8 +579,21 @@ setip() {                                                                       
 }
 
 # --- recon wrappers (plain nmap with fixed flags; output goes to nmap/)
+# _archive_scan <name>: before a scan overwrites nmap/<name>.*, keep the previous results as
+# <name>-<time of that scan>.<ext>, so a re-run (e.g. after a machine revert) loses nothing
+_archive_scan() {
+  local ext f stamp
+  for ext in nmap gnmap xml; do
+    f="$BOX_DIR/nmap/$1.$ext"
+    if [ -f "$f" ]; then
+      stamp="$(date -r "$f" '+%Y%m%d-%H%M%S')"
+      mv -f "$f" "$BOX_DIR/nmap/$1-$stamp.$ext"
+    fi
+  done
+}
 portscan() {                                                                                 # all TCP ports -> nmap/allports.*, sets $PORTS
   [ -n "${IP:-}" ] || { echo "IP not set (use: setip <ip>)"; return 1; }
+  _archive_scan allports
   _sudo nmap -p- --min-rate 2000 -T4 -oA "$BOX_DIR/nmap/allports" "$IP" || return
   local found
   found="$(grep -oE '[0-9]+/open/tcp' "$BOX_DIR/nmap/allports.gnmap" | cut -d/ -f1 | sort -un | paste -sd,)"
@@ -508,20 +602,26 @@ portscan() {                                                                    
   echo "Open ports: ${PORTS:-none}"
 }
 udpscan() {                                                                                  # udpscan [N] -> top-N UDP ports + version detection
-  local n="${1:-20}" found
+  local n="${1:-20}" found maybe
   case "$n" in ''|*[!0-9]*) echo "usage: udpscan [number-of-top-ports]"; return 1 ;; esac
   [ -n "${IP:-}" ] || { echo "IP not set (use: setip <ip>)"; return 1; }
   echo "UDP scans are slow (minutes). Consider running this in a second tab."
+  _archive_scan udp
   _sudo nmap -sU -sV --top-ports "$n" --open -oA "$BOX_DIR/nmap/udp" "$IP" || return
   found="$(grep -oE '[0-9]+/open/udp' "$BOX_DIR/nmap/udp.gnmap" | cut -d/ -f1 | sort -un | paste -sd,)"
+  maybe="$(grep -oE '[0-9]+/open\|filtered/udp' "$BOX_DIR/nmap/udp.gnmap" | cut -d/ -f1 | sort -un | paste -sd,)"
   _boxsync; UDP_PORTS="$found"; export UDP_PORTS; _saveenv
-  note "udpscan top $n: open UDP ports ${UDP_PORTS:-none}"
+  note "udpscan top $n: open UDP ports ${UDP_PORTS:-none}${maybe:+ (open|filtered: $maybe)}"
   echo "Open UDP ports: ${UDP_PORTS:-none}"
+  [ -n "$maybe" ] && echo "open|filtered (not stored in \$UDP_PORTS; check nmap/udp.nmap): $maybe"
+  return 0
 }
 svcscan() {                                                                                  # svcscan [ports] -> default scripts + versions
   local p="${1:-${PORTS:-}}"
   [ -n "${IP:-}" ] || { echo "IP not set (use: setip <ip>)"; return 1; }
   [ -n "$p" ] || { echo "no ports: run portscan first, or: svcscan 22,80"; return 1; }
+  case "$p" in *[!0-9,-]*) echo "svcscan: ports must be numbers or ranges separated by commas (got: $p)"; return 1 ;; esac
+  _archive_scan services
   _sudo nmap -sC -sV -p "$p" -oA "$BOX_DIR/nmap/services" "$IP" && note "svcscan on ports $p"
 }
 
@@ -552,7 +652,15 @@ shot() {                                                                        
 }
 
 # --- file transfer
-serve() { ( cd "$BOX_DIR/transfer" && python3 -m http.server "${1:-80}" ); }                 # serve [port]  (serves transfer/)
+serve() {                                                                                    # serve [port]  (serves transfer/; sudo for ports below 1024)
+  local port="${1:-80}"
+  case "$port" in ''|*[!0-9]*) echo "usage: serve [port]"; return 1 ;; esac
+  if [ "$port" -lt 1024 ] && [ "$(id -u)" -ne 0 ]; then
+    ( cd "$BOX_DIR/transfer" && sudo python3 -m http.server "$port" )
+  else
+    ( cd "$BOX_DIR/transfer" && python3 -m http.server "$port" )
+  fi
+}
 
 # --- creds & proof
 addcred() {                                                                                  # addcred user:pass [where found]
