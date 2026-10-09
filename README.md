@@ -1,6 +1,6 @@
 # mkbox
 
-A small bash utility for organizing and documenting penetration-testing practice boxes (built with the OSCP workflow in mind). It creates a consistent per-box workspace in the **current directory**, drops you into a logged shell inside it, and turns your notes and evidence into a report draft.
+A small bash utility for organizing and documenting penetration-testing practice boxes (built with the OSCP workflow in mind). It creates a consistent per-box workspace in the **current directory**, drops you into a logged shell inside it, and turns your notes, commands and evidence into a report draft.
 
 `mkbox` is a **note-taking and file-organization tool**. It does not exploit, scan, or attack anything on its own. See [What it does and doesn't do](#what-it-does-and-doesnt-do).
 
@@ -11,6 +11,7 @@ A small bash utility for organizing and documenting penetration-testing practice
 - [Commands](#commands)
 - [Box layout](#box-layout)
 - [The box shell](#the-box-shell)
+- [Shared state and multiple tabs](#shared-state-and-multiple-tabs)
 - [Helpers](#helpers)
 - [Logs](#logs)
 - [Reporting](#reporting)
@@ -19,24 +20,30 @@ A small bash utility for organizing and documenting penetration-testing practice
 
 ## Install
 
-```bash
+```
 git clone https://github.com/cherneydh/mkbox mkbox && cd mkbox
 sudo install -m 755 mkbox /usr/local/bin/mkbox
 ```
 
 Or put `mkbox` anywhere on your `PATH` (for example `~/bin`) and `chmod +x mkbox`.
 
-Requirements: `bash`, `script` (util-linux), `tar`, `find`, and `perl` (preinstalled on Kali; without it, log cleanup falls back to `sed`). The `portscan` and `svcscan` helpers need `nmap`, and `shot` needs `xclip` (X11) or `wl-clipboard` (Wayland).
+Requirements:
+
+- `bash`, `script` (util-linux), `tar`, `find`, and GNU `date`, `sed`, `awk`, `grep` (all standard on Kali)
+- `perl` for log cleanup (preinstalled on Kali; without it, cleanup falls back to a cruder `sed` version)
+- `nmap` for `portscan`, `udpscan` and `svcscan`
+- `xclip` (X11) or `wl-clipboard` (Wayland) for `shot`
 
 ## Quick start
 
-```bash
+```
 cd ~/oscp/htb
 mkbox lame 10.10.10.3        # create ./lame, enter it, start logging
 
 # inside the box shell
-portscan                     # all-ports nmap sweep, saved to nmap/
+portscan                     # all-TCP-ports nmap sweep, saved to nmap/
 svcscan                      # default scripts + versions on the open ports
+udpscan                      # top-20 UDP ports (slow; try a second tab)
 note "anonymous FTP allowed" # timestamped timeline entry
 addcred bob:hunter2 "ssh"    # record a credential
 exit                         # leave; the session log is cleaned automatically
@@ -53,27 +60,31 @@ mkbox -r|--report [--creds] <boxname|path>
 mkbox -l|--list
 ```
 
-| Command | What it does |
-|---------|--------------|
-| `mkbox lame 10.10.10.3` | Creates `./lame`, enters it, starts logging |
-| `mkbox lame` | Re-enters an existing box as a new session (safe to run in several tabs at once) |
-| `mkbox .` | Uses the current directory as the box |
-| `mkbox ~/labs/pg/foo` | Any path works; the last component is the box name |
-| `mkbox -n lame 10.10.10.3` | Creates the box without starting a shell |
-| `mkbox -c lame` | Rebuilds the cleaned log from the raw session logs |
-| `mkbox -r lame` | Builds a report draft and evidence tarball |
-| `mkbox -r --creds lame` | Same, but includes recorded credentials |
-| `mkbox -l` | Lists boxes in the current directory with target IP and proof status |
+| Command                    | What it does                                                                     |
+| -------------------------- | -------------------------------------------------------------------------------- |
+| `mkbox lame 10.10.10.3`    | Creates `./lame`, enters it, starts logging                                      |
+| `mkbox lame`               | Re-enters an existing box as a new session (safe to run in several tabs at once) |
+| `mkbox .`                  | Uses the current directory as the box                                            |
+| `mkbox ~/labs/pg/foo`      | Any path works; the last component is the box name                               |
+| `mkbox -n lame 10.10.10.3` | Creates the box without starting a shell                                         |
+| `mkbox -c lame`            | Rebuilds the cleaned log from the raw session logs                               |
+| `mkbox -r lame`            | Builds a report draft and evidence tarball                                       |
+| `mkbox -r --creds lame`    | Same, but includes recorded credentials                                          |
+| `mkbox -l`                 | Lists boxes in the current directory with target IP and proof status             |
 
 The box is always created relative to where you run the command, so you can organize things however you like (`~/oscp/htb/`, `~/oscp/pg/`, and so on).
 
 Box names must start with a letter or digit and contain only letters, digits, `.`, `_`, `-`.
 
+The target must be an IP or hostname made of letters, digits, `.`, `:` and `-`, and it cannot start with `-`. (That keeps a value like `-sV` from ever being passed to nmap as an option.)
+
+If you re-enter a box with a different IP (`mkbox lame 10.10.10.9`), the IP stored in `box.env` is updated. Inside the shell, prefer `setip`, which also updates the notes header and logs the change to the timeline.
+
 ## Box layout
 
 ```
 lame/
-├── nmap/                   scan output
+├── nmap/                   scan output (older results are kept, see "Recon wrappers")
 ├── web/                    web enumeration output
 ├── loot/                   files pulled from the target
 ├── exploits/               exploit code and modifications
@@ -84,7 +95,7 @@ lame/
 ├── screenshots/            saved by `shot`; captions.tsv holds timestamp + note per image
 ├── transfer/               files to serve to the target
 ├── report/                 generated by `mkbox -r`
-├── box.env                 stores the target IP
+├── box.env                 shared state: IP, PORTS, UDP_PORTS (read by every tab)
 ├── session-lame.log        cleaned session log (readable)
 ├── .sessions/              raw `script` output, one file per mkbox invocation
 ├── .bash_history_lame      per-box history with timestamps
@@ -100,40 +111,57 @@ Entering a box starts a `bash` session (even if your login shell is zsh) with:
 - `script` logging everything to a raw log for this session, flushed after every write so a crash doesn't lose it
 - `HISTTIMEFORMAT="%F %T "` so `history` shows dates and times
 - a per-box history file, written after every command (not just on exit)
-- `$IP` set to the target, plus `$BOX` and `$BOX_DIR`
+- `$IP`, `$PORTS` and `$UDP_PORTS` kept in sync across tabs (see below), plus `$BOX` and `$BOX_DIR`
 - a `[box:name]` prefix in your prompt
 - a leading space on a command keeps it out of history (`HISTCONTROL=ignorespace`)
 
 Type `exit` to leave. You return to the directory you started in.
 
+## Shared state and multiple tabs
+
+Open `mkbox lame` in as many terminal tabs as you like. Each tab gets its own raw log, so they never overwrite or scramble each other, and each shows up as its own labeled section in `session-lame.log` (ordered by start time, not interleaved).
+
+Shared between tabs:
+
+- **`$IP`, `$PORTS`, `$UDP_PORTS`.** They live in `box.env`, and every tab re-reads that file before each prompt. Run `setip` after a machine revert, or `portscan` / `udpscan` in one tab, and the other tabs pick up the new values at their next prompt. `box.env` is written atomically (temp file and rename), so a tab never reads a half-written file.
+- the timestamped history file (written after every command)
+- `notes/timeline.md`, `screenshots/`, and everything else in the box folder
+
+Not shared: output. Each tab's terminal output goes to that tab's own log.
+
+**Gotcha: the sync overwrites manual changes.** Because `box.env` is re-read at every prompt, typing `IP=10.10.10.50` or `PORTS=22,80` by hand is reverted at the next prompt. Use `setip` to change the target. For other hosts (pivoting, the AD set), use your own variable names such as `$DC` or `$T2`.
+
+If a session ends abnormally (terminal closed, SSH dropped), cleanup doesn't run. Run `mkbox -c <boxname>` to rebuild the cleaned log.
+
 ## Helpers
 
 Available inside the box shell:
 
-| Helper | What it does |
-|--------|--------------|
-| `note "text"` | Appends a timestamped line to `notes/timeline.md` |
-| `shot "note"` | Saves the image on your clipboard to `screenshots/` with a timestamp and note, and logs it to the timeline |
-| `boxinfo` | Shows target, ports, file counts, proof checklist, recent timeline |
-| `boxcd [subdir]` | `cd` to the box directory or a subfolder (`boxcd nmap`) |
-| `setip <ip>` | Changes the target IP (after a machine revert); updates `box.env` and the notes header |
-| `portscan` | Runs `nmap -p- --min-rate 2000 -T4` into `nmap/allports.*`, sets `$PORTS` |
-| `svcscan [ports]` | Runs `nmap -sC -sV -p <ports>` into `nmap/services.*` (defaults to `$PORTS`) |
-| `serve [port]` | Runs `python3 -m http.server` in `transfer/` (default port 80) |
-| `addcred user:pass [where]` | Appends to `creds/creds.txt`; the timeline records only the username |
-| `proofcmd` | Prints one-liners to paste on a target to show proof file, user, hostname, and IP |
-| `cleanlog` | Rebuilds the cleaned session log mid-session |
-| `report [--creds]` | Same as `mkbox -r` for the current box |
+| Helper                      | What it does                                                                                                      |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `note "text"`               | Appends a timestamped line to `notes/timeline.md`                                                                 |
+| `shot "note"`               | Saves the image on your clipboard to `screenshots/` with a timestamp and note, and logs it to the timeline        |
+| `boxinfo`                   | Shows target, ports, file counts, proof checklist, recent timeline                                                |
+| `boxcd [subdir]`            | `cd` to the box directory or a subfolder (`boxcd nmap`)                                                           |
+| `setip <ip>`                | Changes the target IP (after a machine revert); validates it, updates `box.env` and the notes header              |
+| `portscan`                  | Runs `nmap -p- --min-rate 2000 -T4` into `nmap/allports.*`, sets `$PORTS`                                         |
+| `udpscan [N]`               | Runs `nmap -sU -sV --top-ports N --open` (default 20) into `nmap/udp.*`, sets `$UDP_PORTS`                        |
+| `svcscan [ports]`           | Runs `nmap -sC -sV -p <ports>` into `nmap/services.*` (defaults to `$PORTS`; accepts numbers and ranges)          |
+| `serve [port]`              | Runs `python3 -m http.server` in `transfer/` (default port 80; uses `sudo` for ports below 1024 if you aren't root) |
+| `addcred user:pass [where]` | Appends to `creds/creds.txt`; the timeline records only the username                                              |
+| `proofcmd`                  | Prints one-liners to paste on a target to show proof file, user, hostname, and IP                                 |
+| `cleanlog`                  | Rebuilds the cleaned session log mid-session                                                                      |
+| `report [--creds]`          | Same as `mkbox -r` for the current box                                                                            |
 
 ### Screenshots
 
 Take a screenshot with whatever tool you like, copy it to the clipboard, then run:
 
-```bash
+```
 shot "anonymous FTP login works"
 ```
 
-This saves the clipboard image as `screenshots/<YYYYmmdd-HHMMSS>-<note-slug>.png`, records the note and time in `screenshots/captions.tsv`, and adds a line to `notes/timeline.md`. `mkbox -r` then embeds each screenshot in the report draft with its caption and timestamp.
+This saves the clipboard image as `screenshots/<YYYYmmdd-HHMMSS>-<note-slug>.png`, records the note and time in `screenshots/captions.tsv`, and adds a line to `notes/timeline.md`. `mkbox -r` embeds each screenshot in the report draft with its caption and timestamp, in the order you took them.
 
 - The image is saved exactly as copied. `shot` never edits or annotates it.
 - It needs `xclip` on X11 (`sudo apt install xclip`) or `wl-clipboard` on Wayland. The clipboard must contain a PNG; anything else is rejected without saving.
@@ -141,28 +169,48 @@ This saves the clipboard image as `screenshots/<YYYYmmdd-HHMMSS>-<note-slug>.png
 
 ### Recon wrappers
 
-`portscan` and `svcscan` are thin wrappers that run `nmap` with the fixed flags shown above, so you can read exactly what they do in the script. They use `sudo` unless you are already root.
+`portscan`, `udpscan` and `svcscan` are thin wrappers that run `nmap` with the fixed flags shown above, so you can read exactly what they do in the script. They use `sudo` unless you are already root.
+
+- **Re-runs keep your old results.** Before a scan overwrites `nmap/allports.*`, `nmap/udp.*` or `nmap/services.*`, the previous files are renamed with the time of that scan (for example `allports-20261009-160035.nmap`). The report includes all of them, oldest first.
+- **UDP is slow.** `udpscan` can take minutes; run it in a second tab. Only ports nmap reports as `open` go into `$UDP_PORTS`. Ports reported as `open|filtered` are printed and noted in the timeline, but not stored; check `nmap/udp.nmap` for them.
 
 ## Logs
 
 - `.sessions/<start-time>-<pid>.raw` is the raw `script` output for one `mkbox` invocation, including escape codes. Every invocation gets its own file.
-- `session-<name>.log` is the readable version. It is rebuilt from all the raw session logs every time you exit, oldest first, with a `===== session <start time> =====` header before each one, so earlier sessions are never lost.
+- `session-<boxname>.log` is the readable version. It is rebuilt from all the raw session logs every time you exit, oldest first, with a `===== session <start time> =====` header before each one, so earlier sessions are never lost.
 
-### Multiple tabs
-
-Open `mkbox lame` in as many terminal tabs as you like. Each tab gets its own raw log, so they never overwrite or scramble each other, and each shows up as its own labeled section in `session-lame.log` (ordered by start time, not interleaved). Everything else is shared: the timestamped history file (written after every command), `notes/timeline.md`, `screenshots/`, and `$IP`. Output from different tabs is not merged into one stream.
-- If a session ends abnormally (terminal closed, SSH dropped), cleanup doesn't run. Run `mkbox -c <name>` to rebuild it.
-
-Cleanup removes escape sequences, carriage returns, backspaces, and window-title codes. It does not re-render the screen, so tab completion and Ctrl-R redraws can leave repeated prompt fragments. Commands and their output are all preserved.
+Cleanup behaves like a simple terminal: carriage returns and backspaces move a cursor and later characters **overwrite** earlier ones, `ESC[K` erases to end of line, cursor-move and delete sequences from readline are applied, and colors, window titles and other control codes are dropped. Tab completion, Ctrl-R and history recall therefore come out as the final line you saw. It cannot follow cursor-up redraws of a command that wraps across several screen rows, so very long wrapped lines can still show leftover fragments. Commands and their output are always preserved. Without `perl`, cleanup falls back to a cruder version that strips escapes but doesn't apply overwrites.
 
 ## Reporting
 
 `mkbox -r <box>` writes two files into `<box>/report/`:
 
-- `<name>-report.md`: a draft assembled from your notes, timeline, nmap results, screenshots (as image links with their captions and timestamps), exploit and loot filenames, and credentials section.
-- `<name>-evidence.tar.gz`: `notes/`, `screenshots/`, `nmap/`, `exploits/`, `web/`, the cleaned session log, and the report draft.
+- `<boxname>-report.md`: a draft assembled from your notes, a chronological log, nmap results, screenshots, exploit and loot filenames, and a credentials section.
+- `<boxname>-evidence.tar.gz`: `notes/`, `screenshots/`, `nmap/`, `exploits/`, `web/`, the cleaned session log, and the report draft.
 
-By default credentials are **not** included and `loot/` contents are never bundled (filenames only). Pass `--creds` to include `creds/`. The draft is a starting point: you still write the actual report.
+### The chronological log
+
+The **Timeline** section merges three sources by time:
+
+- **commands** from the box's history file, shown in code blocks with a timestamp
+- **notes** from `notes/timeline.md`
+- **screenshots** from `screenshots/captions.tsv`, listed with file name and caption (the images themselves are embedded in the **Screenshots** section)
+
+What it leaves out or changes:
+
+- Trivial commands are skipped: `ls`, `ll`, `la`, `cd`, `pwd`, `clear`, `history`, `exit`, `logout`, and the helpers `note`, `shot`, `boxinfo`, `boxcd`, `cleanlog`, `proofcmd`, `report`.
+- `addcred user:pass ...` appears as `addcred user:***`, so the password never reaches the report.
+- Commands you start with a space aren't in your history, so they aren't in the log either (they are still in the session log).
+
+If there's no history yet, the section falls back to the raw `timeline.md`. The merge needs GNU `date`.
+
+### What is and isn't included
+
+By default credentials are **not** inlined and `loot/` contents are never bundled (filenames only). Pass `--creds` to include `creds/`.
+
+That only covers those folders. Notes, exploits and the session log are bundled as you typed them, and other passwords you typed into commands (an `ssh` or `hydra` line, say) appear in the chronological log. When you run without `--creds`, `mkbox -r` checks every password in `creds/creds.txt` against the files going into the bundle and prints a `WARNING` naming where it found one. It can't catch passwords you never recorded with `addcred`.
+
+The draft is a starting point: you still write the actual report.
 
 ## What it does and doesn't do
 
@@ -173,7 +221,7 @@ By default credentials are **not** included and `loot/` contents are never bundl
 - keep timestamped shell history
 - wrap `nmap` and `python3 -m http.server` in short helpers that you invoke yourself
 - read your clipboard, only when you run `shot`, and only to save an image you copied
-- assemble your notes and screenshots into a markdown draft and a tarball
+- assemble your notes, commands and screenshots into a markdown draft and a tarball
 
 **It doesn't:**
 
@@ -188,4 +236,5 @@ The whole tool is a single readable bash script (`mkbox`), so it is easy to audi
 
 - The raw log, cleaned log, and history capture everything you type or paste, including passwords. **Do not commit box directories to a public repository.** Only commit the tool itself.
 - `.box.rc` is regenerated on every run. To change helpers or shell settings, edit the heredoc in `mkbox`, not the generated file.
-- `mkbox` expects GNU `find` and `realpath` (standard on Kali and most Linux distros).
+- Changing `$IP` by hand doesn't stick; use `setip` (see [Shared state and multiple tabs](#shared-state-and-multiple-tabs)).
+- `mkbox` expects GNU `find`, `date` and `realpath` (standard on Kali and most Linux distros).
