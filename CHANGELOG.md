@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2
+
+- Added timeline generation when `report` is ran so total timeline is established.
+- Improved reliability of proofcmd outputted commands.
+
 ## 1.0.1
 
 ### Fixed
