@@ -370,7 +370,8 @@ md_filelist() {
 # than one screen row, and clean_log's line-based model can't follow that (see its header comment).
 # The observed result is always the same shape: the credential itself (and anything after it)
 # survives on its own physical line intact, with only some trailing suffix of the word "addcred"
-# still attached before it - "ddcred bob:pass ...", "d bob:pass ...", or nothing at all. So a line
+# still attached before it - "ddcred bob:pass ...", "d bob:pass ...", or nothing at all (with
+# no usable terminal width, readline also prefixes a "<" scroll marker: "<ddcred bob:pass"). So a line
 # also doesn't count if everything before the credential, once trimmed, is itself such a suffix.
 _warn_secrets_keep() {
   local cred="$1" file lineno content before
@@ -378,6 +379,7 @@ _warn_secrets_keep() {
     case "$content" in *'addcred '*) continue ;; esac
     before="${content%%"$cred"*}"
     before="${before%"${before##*[![:space:]]}"}"            # rtrim trailing whitespace
+    before="${before#<}"                                      # readline's "line is scrolled" marker, e.g. "<ddcred"
     [[ "addcred" == *"$before" ]] && continue                 # "", d, ed, red, cred, dcred, ddcred, addcred
     printf '%s:%s\n' "$file" "$lineno"
   done
