@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.0
+
+### Added
+
+- **`serve --smb` / `serve --webdav`.** `serve` can now share `transfer/` over SMB (impacket's
+  `smbserver`, SMB2 on) or WebDAV (WsgiDAV) instead of the default Python HTTP server. New options:
+  `--share NAME` and `--auth user:pass` (SMB). Default ports: 445 for SMB, 80 otherwise.
+- **Scratchpad.** `pad` inside the box shell (and `mkbox -p <box|-g>` outside it) keeps free-form
+  notes and commands in `<box>/scratchpad.md`, or one global pad with `-g`. It persists across sessions
+  and is kept out of the report and evidence tarball.
+
 ## 1.0.2
 
 - Added timeline generation when `report` is ran so total timeline is established.
