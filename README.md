@@ -13,6 +13,7 @@ A small bash utility for organizing and documenting penetration-testing practice
 - [The box shell](#the-box-shell)
 - [Shared state and multiple tabs](#shared-state-and-multiple-tabs)
 - [Helpers](#helpers)
+- [Logging connections (ssh, ftp, rdp, ...)](#logging-connections-ssh-ftp-rdp-)
 - [Logs](#logs)
 - [Reporting](#reporting)
 - [What it does and doesn't do](#what-it-does-and-doesnt-do)
@@ -72,6 +73,8 @@ mkbox -l|--list
 | `mkbox -r --creds lame`    | Same, but includes recorded credentials                                          |
 | `mkbox -l`                 | Lists boxes in the current directory with target IP and proof status             |
 
+Flags and the box name/IP can be given in any order (`mkbox lame -n 10.10.10.3` works the same as `mkbox -n lame 10.10.10.3`); only the first two non-flag arguments are used, as box name and then IP.
+
 The box is always created relative to where you run the command, so you can organize things however you like (`~/oscp/htb/`, `~/oscp/pg/`, and so on).
 
 Box names must start with a letter or digit and contain only letters, digits, `.`, `_`, `-`.
@@ -99,7 +102,8 @@ lame/
 ├── session-lame.log        cleaned session log (readable)
 ├── .sessions/              raw `script` output, one file per mkbox invocation
 ├── .bash_history_lame      per-box history with timestamps
-└── .box.rc                 shell setup (regenerated each run)
+├── .box.rc                 shell setup (regenerated each run)
+└── .gitignore              contains just "*" (created once, see Caveats)
 ```
 
 `notes/notes.md` is created once and never overwritten.
@@ -123,13 +127,13 @@ Open `mkbox lame` in as many terminal tabs as you like. Each tab gets its own ra
 
 Shared between tabs:
 
-- **`$IP`, `$PORTS`, `$UDP_PORTS`.** They live in `box.env`, and every tab re-reads that file before each prompt. Run `setip` after a machine revert, or `portscan` / `udpscan` in one tab, and the other tabs pick up the new values at their next prompt. `box.env` is written atomically (temp file and rename), so a tab never reads a half-written file.
+- **`$IP`, `$PORTS`, `$UDP_PORTS`.** They live in `box.env`, and every tab checks that file's modification time before each prompt and only re-reads it when it has actually changed. Run `setip` after a machine revert, or `portscan` / `udpscan` in one tab, and the other tabs pick up the new values at their next prompt. `box.env` is written atomically (temp file and rename), so a tab never reads a half-written file.
 - the timestamped history file (written after every command)
 - `notes/timeline.md`, `screenshots/`, and everything else in the box folder
 
 Not shared: output. Each tab's terminal output goes to that tab's own log.
 
-**Gotcha: the sync overwrites manual changes.** Because `box.env` is re-read at every prompt, typing `IP=10.10.10.50` or `PORTS=22,80` by hand is reverted at the next prompt. Use `setip` to change the target. For other hosts (pivoting, the AD set), use your own variable names such as `$DC` or `$T2`.
+**Manual edits now stick (until something else writes `box.env`).** Typing `IP=10.10.10.50` by hand is no longer reverted at the next prompt, because the sync only re-sources `box.env` when its mtime changes. It's still better to use `setip`, because that also updates the notes header and the timeline - a hand-set `$IP` only changes the variable. And the next `portscan` / `udpscan` in that tab will happily save your hand-set `$IP` back into `box.env` (sharing it with other tabs), since mkbox has no way to tell a manual edit from an intentional one. For other hosts (pivoting, the AD set), use your own variable names such as `$DC` or `$T2` so they never collide with `box.env` at all.
 
 If a session ends abnormally (terminal closed, SSH dropped), cleanup doesn't run. Run `mkbox -c <boxname>` to rebuild the cleaned log.
 
@@ -147,7 +151,8 @@ Available inside the box shell:
 | `portscan`                  | Runs `nmap -p- --min-rate 2000 -T4` into `nmap/allports.*`, sets `$PORTS`                                         |
 | `udpscan [N]`               | Runs `nmap -sU -sV --top-ports N --open` (default 20) into `nmap/udp.*`, sets `$UDP_PORTS`                        |
 | `svcscan [ports]`           | Runs `nmap -sC -sV -p <ports>` into `nmap/services.*` (defaults to `$PORTS`; accepts numbers and ranges)          |
-| `serve [port]`              | Runs `python3 -m http.server` in `transfer/` (default port 80; uses `sudo` for ports below 1024 if you aren't root) |
+| `serve [--bind ip] [port]`  | Runs `python3 -m http.server` in `transfer/` (default port 80, all interfaces; uses `sudo` for ports below 1024 if you aren't root) |
+| `ssh`, `ftp`, `sftp`, `smbclient`, `rdesktop`, `xfreerdp`, `nc`, `telnet`, `mysql`, ... | Logged automatically on connect/disconnect - see [Logging connections](#logging-connections-ssh-ftp-rdp-) |
 | `addcred user:pass [where]` | Appends to `creds/creds.txt`; the timeline records only the username                                              |
 | `proofcmd`                  | Prints one-liners to paste on a target to show proof file, user, hostname, and IP                                 |
 | `cleanlog`                  | Rebuilds the cleaned session log mid-session                                                                      |
@@ -173,6 +178,23 @@ This saves the clipboard image as `screenshots/<YYYYmmdd-HHMMSS>-<note-slug>.png
 
 - **Re-runs keep your old results.** Before a scan overwrites `nmap/allports.*`, `nmap/udp.*` or `nmap/services.*`, the previous files are renamed with the time of that scan (for example `allports-20261009-160035.nmap`). The report includes all of them, oldest first.
 - **UDP is slow.** `udpscan` can take minutes; run it in a second tab. Only ports nmap reports as `open` go into `$UDP_PORTS`. Ports reported as `open|filtered` are printed and noted in the timeline, but not stored; check `nmap/udp.nmap` for them.
+- **Output isn't left root-owned.** `nmap -oA` runs under `sudo`, so its output files are written as root; mkbox hands them back to you (`chown`) right after each scan, so you don't need `sudo` just to read your own results.
+
+## Logging connections (ssh, ftp, rdp, ...)
+
+Connecting out to the target is one of the most report-relevant things you do, so mkbox wraps a set of common remote/transfer commands - `ssh`, `sshpass`, `ftp`, `sftp`, `ncftp`, `lftp`, `smbclient`, `rdesktop`, `xfreerdp`, `remmina`, `nc`, `ncat`, `netcat`, `telnet`, `mysql`, `psql`, `evil-winrm` - and logs each one to `notes/timeline.md` automatically:
+
+```
+2026-10-09 18:04:08  ssh: started (-p *** bob@10.10.10.9)
+2026-10-09 18:04:41  ssh: ended (exit 0, 33s)
+```
+
+**This is passthrough, not a new feature to interact with.** Each wrapper runs the real binary directly, in the foreground, with your terminal exactly as it would be without mkbox: interactive password prompts, full-screen programs (`vim` or a shell over `ssh`), `scp`/`sftp` progress bars, Ctrl-C, and the real exit code all behave normally. Nothing is piped, backgrounded, or given its own pty. A command is only wrapped if that binary is actually on your `PATH` when the box shell starts, so nothing is ever shadowed by a "command not found."
+
+- **Password masking is best-effort**, same spirit and same limits as `addcred`/`warn_secrets`: it catches `-p`/`-P`/`--password[=]`/`--pass[=]` followed by a value, and the credential portion of a `user:pass@host` URL. It does not catch a password spelled some other tool's own way, and it doesn't need to catch one typed at an interactive prompt - that one was never on the command line. The **raw session log always has the real command** (that's what `script` records), so masking only affects the generated report's chronological log and the timeline note, never your actual history.
+- **`sudo` bypasses the wrapper**, because `sudo` resolves the real binary from `PATH`, not from your shell's functions - `sudo nc ...` is still captured in your history and session log like any other command, just without the start/end timeline note.
+- **To run the real binary once without logging it**: `command ssh ...` or `\ssh ...`.
+- **To wrap more tools** (or fewer): set `MKBOX_NET_CMDS` to a space-separated list of binary names, either in your shell before running `mkbox`, or in your own `~/.bashrc` (which loads before `.box.rc` and is respected).
 
 ## Logs
 
@@ -200,15 +222,16 @@ What it leaves out or changes:
 
 - Trivial commands are skipped: `ls`, `ll`, `la`, `cd`, `pwd`, `clear`, `history`, `exit`, `logout`, and the helpers `note`, `shot`, `boxinfo`, `boxcd`, `cleanlog`, `proofcmd`, `report`.
 - `addcred user:pass ...` appears as `addcred user:***`, so the password never reaches the report.
+- A password passed to `ssh`/`ftp`/`smbclient`/etc. via `-p`, `-P`, `--password[=]`, `--pass[=]`, or in a `user:pass@host` URL is masked the same way - see [Logging connections](#logging-connections-ssh-ftp-rdp-) for exactly what that does and doesn't catch.
 - Commands you start with a space aren't in your history, so they aren't in the log either (they are still in the session log).
 
-If there's no history yet, the section falls back to the raw `timeline.md`. The merge needs GNU `date`.
+If there's no history yet, the section falls back to the raw `timeline.md`. The merge needs GNU `date`. If a timestamp in `notes/timeline.md` or `screenshots/captions.tsv` can't be parsed, `mkbox -r` prints a `WARNING` to stderr and leaves that source out of the merged **Timeline** section for this run rather than silently dropping it - the raw notes/captions themselves are untouched and still go into the evidence tarball.
 
 ### What is and isn't included
 
 By default credentials are **not** inlined and `loot/` contents are never bundled (filenames only). Pass `--creds` to include `creds/`.
 
-That only covers those folders. Notes, exploits and the session log are bundled as you typed them, and other passwords you typed into commands (an `ssh` or `hydra` line, say) appear in the chronological log. When you run without `--creds`, `mkbox -r` checks every password in `creds/creds.txt` against the files going into the bundle and prints a `WARNING` naming where it found one. It can't catch passwords you never recorded with `addcred`.
+That only covers those folders. Notes, exploits and the session log are bundled as you typed them, and other passwords you typed into commands not covered by the masking above (a `hydra` line, say, or a tool-specific password flag the [connection wrappers](#logging-connections-ssh-ftp-rdp-) don't recognize) appear in the chronological log. When you run without `--creds`, `mkbox -r` checks every password in `creds/creds.txt` against the files going into the bundle and prints a `WARNING` naming where it found one. It can't catch passwords you never recorded with `addcred`.
 
 The draft is a starting point: you still write the actual report.
 
@@ -219,14 +242,14 @@ The draft is a starting point: you still write the actual report.
 - create folders and a notes template on your own machine
 - record your own terminal session to a local log file
 - keep timestamped shell history
-- wrap `nmap` and `python3 -m http.server` in short helpers that you invoke yourself
+- wrap `nmap`, `python3 -m http.server`, and common connection tools (`ssh`, `ftp`, `rdesktop`, ...) in short helpers that you invoke yourself - see [Logging connections](#logging-connections-ssh-ftp-rdp-)
 - read your clipboard, only when you run `shot`, and only to save an image you copied
 - assemble your notes, commands and screenshots into a markdown draft and a tarball
 
 **It doesn't:**
 
 - run any scan, exploit, or tool automatically; every action is a command you type
-- send data anywhere or make any network connection of its own
+- send data anywhere or make any network connection of its own - the connection wrappers (`ssh`, `ftp`, ...) only run the real binary with the exact arguments you typed, exactly when you typed it, and only add a local timeline note before and after
 - automate exploitation, brute-forcing, or vulnerability scanning
 - modify the target or anything outside the box directory
 
@@ -234,7 +257,8 @@ The whole tool is a single readable bash script (`mkbox`), so it is easy to audi
 
 ## Caveats
 
-- The raw log, cleaned log, and history capture everything you type or paste, including passwords. **Do not commit box directories to a public repository.** Only commit the tool itself.
+- The raw log, cleaned log, and history capture everything you type or paste, including passwords. **Do not commit box directories to a public repository.** Only commit the tool itself. Every box directory now gets a `.gitignore` containing just `*` the first time it's created (never overwritten if you replace it yourself), so this requires an explicit `git add -f` to defeat rather than a stray `git add -A`.
 - `.box.rc` is regenerated on every run. To change helpers or shell settings, edit the heredoc in `mkbox`, not the generated file.
-- Changing `$IP` by hand doesn't stick; use `setip` (see [Shared state and multiple tabs](#shared-state-and-multiple-tabs)).
+- Changing `$IP` by hand now sticks until `box.env` is next written (by `setip`, `portscan`, `udpscan`, or another tab) - see the gotcha in [Shared state and multiple tabs](#shared-state-and-multiple-tabs). Prefer `setip`.
+- `ssh`, `ftp`, `rdesktop`, and the other commands listed in [Logging connections](#logging-connections-ssh-ftp-rdp-) are wrapped to log a start/end timeline note; this is passthrough and doesn't change how they behave - see that section for exactly what it does and doesn't catch.
 - `mkbox` expects GNU `find`, `date` and `realpath` (standard on Kali and most Linux distros).
