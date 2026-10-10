@@ -43,11 +43,16 @@ cat > "$T/bin/chown" <<'STUB'
 echo "$*" >> "${CHOWN_LOG:-/dev/null}"
 exec "$(PATH="${PATH#*:}" command -v chown)" "$@"
 STUB
+# serve backends: record the arguments instead of starting a server
+for tool in impacket-smbserver wsgidav python3-serve-stub; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >> "${SERVE_LOG:-/dev/null}"\n' "$tool" > "$T/bin/$tool"
+done
 for tool in ssh sshpass; do
   printf '#!/usr/bin/env bash\necho "stub %s $*"\n' "$tool" > "$T/bin/$tool"
 done
 chmod +x "$T/bin/"*
 export CHOWN_LOG="$T/chown.log"
+export SERVE_LOG="$T/serve.log"
 
 cd "$T/my labs" || exit 1
 
@@ -129,6 +134,35 @@ check "--creds puts creds/ in the tarball" bash -c "tar -tzf smoke/report/smoke-
 echo "bob's password is Hunter2pw (oops)" >> smoke/notes/notes.md
 "$MK" -r smoke > "$T/r2.out" 2>&1
 check "leaked password in notes triggers a warning" has "$T/r2.out" "notes/notes.md"
+
+# --- scratchpad + serve backends ----------------------------------------------------------------
+echo "scratchpad"
+"$MK" -p smoke add "check -foo flag on the upload form" > /dev/null 2>&1
+"$MK" -p smoke cmd 'curl -s http://10.10.10.9/?x=1 | head' > /dev/null 2>&1
+check "pad file is mode 600"             mode smoke/scratchpad.md 600
+check "pad add stores text (dash ok)"    has smoke/scratchpad.md "check -foo flag on the upload form"
+check "pad cmd stores a fenced command"  has smoke/scratchpad.md "curl -s http://10.10.10.9/?x=1 | head"
+check "pad grep finds entries"           bash -c "'$MK' -p smoke grep UPLOAD | grep -q foo"
+check "pad path prints the file"         bash -c "[ \"\$('$MK' -p smoke path)\" = \"$PWD/smoke/scratchpad.md\" ]"
+"$MK" -r smoke > /dev/null 2>&1
+check "pad is not in the evidence tarball" bash -c "! tar -tzf smoke/report/smoke-evidence.tar.gz | grep -q scratchpad"
+check "pad on a non-box fails"           bash -c "! '$MK' -p nosuchbox show 2>/dev/null"
+XDG_DATA_HOME="$T/xdg" "$MK" -p -g add "global note" > /dev/null 2>&1
+check "global pad lives under XDG dir"   has "$T/xdg/mkbox/scratchpad.md" "global note"
+printf '%s\n' 'echo first-cmd' 'pad cmd' 'pad add "from inside the shell"' 'exit' | "$MK" smoke > "$T/pad.out" 2>&1
+check "in-shell: bare pad cmd saves previous command" has smoke/scratchpad.md "echo first-cmd"
+check "in-shell: pad add works"          has smoke/scratchpad.md "from inside the shell"
+
+echo "serve backends"
+printf '%s\n' 'serve --smb --share loot --bind 10.10.14.2 4455' \
+  'serve --smb --auth bob:pw1234' \
+  'serve --webdav --bind 10.10.14.2 8080' \
+  'serve --smb --share "bad share"' \
+  'exit' | "$MK" smoke > "$T/serve.out" 2>&1
+check "smb: share, port, bind passed"    has "$SERVE_LOG" "-smb2support -port 4455 -ip 10.10.14.2 loot $PWD/smoke/transfer"
+check "smb: default port 445 + auth"     has "$SERVE_LOG" "-port 445 -username bob -password pw1234 share"
+check "webdav: host/port/root passed"    has "$SERVE_LOG" "wsgidav --host 10.10.14.2 --port 8080 --root $PWD/smoke/transfer --auth anonymous"
+check "smb: bad share name rejected"     has "$T/serve.out" "--share must be"
 
 # --- re-entering vs typos -----------------------------------------------------------------------
 echo "new vs existing"
