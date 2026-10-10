@@ -4,6 +4,7 @@
 # Usage:  mkbox [-n|--no-shell] <boxname|path> [target-ip]
 #         mkbox -c|--clean  <boxname|path>          rebuild the cleaned session log
 #         mkbox -r|--report [--creds] <boxname|path> build a report draft + evidence tarball
+#         mkbox -p|--pad <box|-g> [edit|add|cmd|show|grep|path]   per-box (or global -g) scratchpad
 #         mkbox -l|--list                            list boxes in the current directory
 #         mkbox -V|--version                         print the version
 #
@@ -22,7 +23,7 @@
 
 set -euo pipefail
 
-VERSION="1.0.2"
+VERSION="1.1.0"
 
 # Written for bash 4.4+ (empty arrays under `set -u`, associative arrays); developed on 5.2.
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
@@ -61,10 +62,67 @@ usage() {
 Usage: mkbox [-n|--no-shell] <boxname|path> [target-ip]
        mkbox -c|--clean  <boxname|path>
        mkbox -r|--report [--creds] <boxname|path>
+       mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PAT|path]
        mkbox -l|--list
        mkbox -V|--version
 U
   exit "${1:-1}"
+}
+
+# pad_file <boxname|path|-g>: print the scratchpad path (creating it, mode 600, if needed).
+# Per box: <box>/scratchpad.md (outside notes/, so it is never part of the report or evidence
+# tarball). Global (-g): ${XDG_DATA_HOME:-~/.local/share}/mkbox/scratchpad.md, shared by all boxes.
+pad_file() {
+  local t="$1" d f
+  if [[ "$t" == "-g" || "$t" == "--global" ]]; then
+    f="${XDG_DATA_HOME:-$HOME/.local/share}/mkbox/scratchpad.md"
+    ( umask 077; mkdir -p -- "$(dirname -- "$f")" )
+  else
+    if [[ "$t" == "." || "$t" == */* ]]; then d="$(realpath -m -- "$t")"; else d="$PWD/$t"; fi
+    [[ -f "$d/box.env" ]] || { echo "mkbox: no such box: $d (no box.env)" >&2; return 1; }
+    f="$d/scratchpad.md"
+  fi
+  if [[ ! -e "$f" ]]; then
+    ( umask 077; printf '# scratchpad\n\nFree-form notes and commands. Not part of the report or evidence tarball.\n\n' > "$f" )
+  fi
+  printf '%s\n' "$f"
+}
+
+# pad_main <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PATTERN|path]
+pad_main() {
+  [[ $# -ge 1 ]] || usage 1
+  local f sub ed
+  f="$(pad_file "$1")" || return 1
+  shift
+  sub="${1:-edit}"
+  [[ $# -gt 0 ]] && shift
+  case "$sub" in
+    edit)
+      ed="${VISUAL:-${EDITOR:-}}"
+      if [[ -z "$ed" ]]; then
+        for ed in nano vim vi; do command -v "$ed" >/dev/null 2>&1 && break; ed=""; done
+      fi
+      [[ -n "$ed" ]] || { echo "mkbox: no editor found - set \$EDITOR (file: $f)" >&2; return 1; }
+      # $ed may carry arguments (EDITOR="code -w"), so let the shell split it
+      # shellcheck disable=SC2086
+      $ed "$f"
+      ;;
+    add)
+      [[ $# -gt 0 ]] || { echo "usage: pad add \"text\"" >&2; return 1; }
+      printf -- '- %s  %s\n' "$(date '+%F %T')" "$*" >> "$f"
+      ;;
+    cmd)
+      [[ $# -gt 0 && -n "$*" ]] || { echo "usage: pad cmd <command>   (inside the box shell, a bare 'pad cmd' saves your previous command)" >&2; return 1; }
+      printf -- '- %s\n\n```\n%s\n```\n\n' "$(date '+%F %T')" "$*" >> "$f"
+      ;;
+    show|cat) cat -- "$f" ;;
+    grep)
+      [[ $# -gt 0 ]] || { echo "usage: pad grep <pattern>" >&2; return 1; }
+      grep -n -i -- "$@" "$f" || true
+      ;;
+    path) printf '%s\n' "$f" ;;
+    *) echo "mkbox: unknown pad command '$sub' (edit, add, cmd, show, grep, path)" >&2; return 1 ;;
+  esac
 }
 
 # Line-level terminal emulation used by clean_log. For each line it keeps a cursor and applies what
@@ -530,6 +588,14 @@ make_report() {
   fi
 }
 
+# Scratchpad: must be the first argument, so later arguments (note text, commands starting with "-")
+# are never mistaken for mkbox options.
+if [[ "${1:-}" == "-p" || "${1:-}" == "--pad" ]]; then
+  shift
+  pad_main "$@"
+  exit $?
+fi
+
 MODE=run
 NO_SHELL=0
 WITH_CREDS=0
@@ -727,6 +793,14 @@ _unroot() {
 # --- notes & navigation
 note()     { printf '%s  %s\n' "$(date '+%F %T')" "$*" >> "$BOX_DIR/notes/timeline.md"; }   # note "got creds for bob"
 boxcd()    { cd "$BOX_DIR/${1:-}" || return; }                                               # boxcd nmap
+pad() {                                                                                      # scratchpad: pad [-g] [edit|add|cmd|show|grep|path]
+  local scope="$BOX_DIR"
+  if [ "${1:-}" = "-g" ]; then scope=-g; shift; fi
+  if [ "${1:-}" = "cmd" ] && [ $# -eq 1 ]; then          # bare `pad cmd` saves the previous command (this one is already in history)
+    set -- cmd "$(fc -ln -2 -2 2>/dev/null | sed 's/^[[:space:]]*//')"
+  fi
+  "$MKBOX_BIN" -p "$scope" "$@"
+}
 boxinfo() {                                                                                  # status overview
   echo "Box:    $BOX"
   echo "Target: ${IP:-<unset>}"
@@ -833,25 +907,68 @@ shot() {                                                                        
 }
 
 # --- file transfer
-serve() {                                                                      # serve [--bind <ip>] [port]  (serves transfer/; sudo for ports below 1024)
-  local bind="" port="80" args=()
+serve() {   # serve [--smb|--webdav|--http] [--bind <ip>] [--share <name>] [--auth user:pass] [port]  (serves transfer/)
+  local mode="http" bind="" port="" share="share" auth="" tool="" t dir="$BOX_DIR/transfer"
+  local usage="usage: serve [--smb|--webdav|--http] [--bind <ip>] [--share <name>] [--auth user:pass] [port]"
   while [ $# -gt 0 ]; do
     case "$1" in
-      --bind) bind="${2:-}"; shift 2 ;;
+      --smb)    mode=smb; shift ;;
+      --webdav) mode=webdav; shift ;;
+      --http)   mode=http; shift ;;
+      --bind)   bind="${2:-}"; shift 2 ;;
       --bind=*) bind="${1#--bind=}"; shift ;;
+      --share)  share="${2:-}"; shift 2 ;;
+      --share=*) share="${1#--share=}"; shift ;;
+      --auth)   auth="${2:-}"; shift 2 ;;
+      --auth=*) auth="${1#--auth=}"; shift ;;
       *) port="$1"; shift ;;
     esac
   done
-  case "$port" in ''|*[!0-9]*) echo "usage: serve [--bind <ip>] [port]"; return 1 ;; esac
-  # Default (no --bind): python's http.server listens on every interface, so transfer/ is reachable
-  # from anywhere on your network, not just the target. Pass --bind <your-vpn-ip> (e.g. tun0) to
-  # restrict it, or --bind 127.0.0.1 if you're only serving over a tunnel/port-forward.
-  [ -n "$bind" ] && args+=(--bind "$bind")
-  if [ "$port" -lt 1024 ] && [ "$(id -u)" -ne 0 ]; then
-    ( cd "$BOX_DIR/transfer" && sudo python3 -m http.server "${args[@]}" "$port" )
-  else
-    ( cd "$BOX_DIR/transfer" && python3 -m http.server "${args[@]}" "$port" )
+  # Default ports: http and webdav 80, smb 445.
+  if [ -z "$port" ]; then
+    case "$mode" in smb) port=445 ;; *) port=80 ;; esac
   fi
+  case "$port" in ''|*[!0-9]*) echo "$usage"; return 1 ;; esac
+  case "$share" in ''|*[!A-Za-z0-9._-]*) echo "serve: --share must be letters, digits, . _ -"; return 1 ;; esac
+  if [ -n "$auth" ]; then
+    case "$auth" in *:*) ;; *) echo "serve: --auth needs user:pass"; return 1 ;; esac
+  fi
+  # Default (no --bind): every interface, so transfer/ is reachable from anywhere on your network, not
+  # just the target. Pass --bind <your-vpn-ip> (e.g. tun0) to restrict it, or --bind 127.0.0.1 if
+  # you're only serving over a tunnel/port-forward.
+  local pre=()
+  if [ "$port" -lt 1024 ] && [ "$(id -u)" -ne 0 ]; then pre=(sudo); fi   # privileged port
+  case "$mode" in
+    http)
+      local args=()
+      [ -n "$bind" ] && args+=(--bind "$bind")
+      ( cd "$dir" && "${pre[@]}" python3 -m http.server "${args[@]}" "$port" )
+      ;;
+    smb)
+      # impacket's smbserver (Kali: package python3-impacket, command impacket-smbserver)
+      for t in impacket-smbserver impacket-smbserver.py smbserver.py; do
+        if command -v "$t" >/dev/null 2>&1; then tool="$(command -v "$t")"; break; fi
+      done
+      [ -n "$tool" ] || { echo "serve: --smb needs impacket's smbserver:  sudo apt install python3-impacket"; return 1; }
+      local sargs=(-smb2support -port "$port")
+      [ -n "$bind" ] && sargs+=(-ip "$bind")
+      [ -n "$auth" ] && sargs+=(-username "${auth%%:*}" -password "${auth#*:}")
+      echo "SMB share: \\\\${bind:-<your-ip>}\\$share  ->  $dir"
+      "${pre[@]}" "$tool" "${sargs[@]}" "$share" "$dir"
+      ;;
+    webdav)
+      # WsgiDAV (Kali: package wsgidav)
+      tool="$(command -v wsgidav 2>/dev/null || true)"
+      [ -n "$tool" ] || { echo "serve: --webdav needs WsgiDAV:  sudo apt install wsgidav   (or: pip install wsgidav cheroot)"; return 1; }
+      local wargs=(--host "${bind:-0.0.0.0}" --port "$port" --root "$dir")
+      if [ -n "$auth" ]; then
+        echo "serve: --auth is not supported with --webdav (anonymous only)"; return 1
+      fi
+      wargs+=(--auth anonymous)
+      echo "WebDAV: http://${bind:-<your-ip>}:$port/  ->  $dir"
+      "${pre[@]}" "$tool" "${wargs[@]}"
+      ;;
+  esac
 }
 
 # --- remote/transfer session logging -------------------------------------------------------
@@ -933,7 +1050,7 @@ report()   { "$MKBOX_BIN" -r "$@" "$BOX_DIR"; }                                 
 echo "Box:    $BOX"
 echo "Target: \$IP=${IP:-<unset>}"
 echo "Dir:    $BOX_DIR"
-echo "Helpers: note shot boxinfo boxcd setip portscan udpscan svcscan serve addcred proofcmd cleanlog report"
+echo "Helpers: note pad shot boxinfo boxcd setip portscan udpscan svcscan serve addcred proofcmd cleanlog report"
 echo "Logged on connect/exit: $MKBOX_NET_CMDS"
 EOF
 # the masking program is shared with the report (see MASK_AWK above); %q makes it safe to source
