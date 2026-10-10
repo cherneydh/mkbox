@@ -5,6 +5,7 @@
 #         mkbox -c|--clean  <boxname|path>          rebuild the cleaned session log
 #         mkbox -r|--report [--creds] <boxname|path> build a report draft + evidence tarball
 #         mkbox -l|--list                            list boxes in the current directory
+#         mkbox -V|--version                         print the version
 #
 # The box is created in the CURRENT directory:
 #   mkbox lame 10.10.10.3     -> ./lame
@@ -21,7 +22,19 @@
 
 set -euo pipefail
 
+VERSION="1.0.0"
+
+# Written for bash 4.4+ (empty arrays under `set -u`, associative arrays); developed on 5.2.
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+  echo "mkbox: needs bash 4.4 or newer (this is ${BASH_VERSION%%[( ]*})" >&2
+  exit 1
+fi
+
 SUBDIRS=(nmap web loot exploits creds notes screenshots transfer)
+# Commands that get a start/end note in the timeline (wrapped inside the box shell) and whose
+# command lines get password masking in reports. Override it in your environment or ~/.bashrc.
+MKBOX_NET_CMDS="${MKBOX_NET_CMDS:-ssh sshpass ftp sftp ncftp lftp smbclient rdesktop xfreerdp remmina nc ncat netcat telnet mysql psql evil-winrm}"
+export MKBOX_NET_CMDS
 # Accepted target IP/hostname; also exported to the box shell for `setip`. It must not start with
 # "-" so a value like "-sV" can never be mistaken for an nmap option later.
 IP_RE='^[A-Za-z0-9:][A-Za-z0-9.:-]*$'
@@ -29,6 +42,7 @@ IP_RE='^[A-Za-z0-9:][A-Za-z0-9.:-]*$'
 # env_get <box_dir> <VAR>: read one variable from box.env ("" if unset or the file is missing)
 env_get() {
   [[ -f "$1/box.env" ]] || return 0
+  # shellcheck source=/dev/null
   ( . "$1/box.env" 2>/dev/null; printf '%s' "${!2:-}" ) || true
 }
 
@@ -48,6 +62,7 @@ Usage: mkbox [-n|--no-shell] <boxname|path> [target-ip]
        mkbox -c|--clean  <boxname|path>
        mkbox -r|--report [--creds] <boxname|path>
        mkbox -l|--list
+       mkbox -V|--version
 U
   exit "${1:-1}"
 }
@@ -102,6 +117,66 @@ while (my $line = <STDIN>) {
 }
 PERL
 
+# Best-effort password masking for command lines, as an awk program. It is used in two places so they
+# can never disagree: the report's command timeline (chrono_log) and the live start/end notes that the
+# ssh/ftp/... wrappers write to timeline.md (_netmask in the box shell). Only commands whose first word
+# is in $MKBOX_NET_CMDS (an optional leading `sudo` is ignored) are touched, and each tool only gets
+# the rules that fit it - e.g. `ssh -p 2222` is a port, so it is left alone, while `sshpass -p` is a
+# password. The raw session log always has the real command; this only affects what is *reported*.
+read -r -d '' MASK_AWK <<'AWK' || true
+# mask_after(s, re, sep, skip, tail): for each match of re in s, keep the text up to and including the
+# first sep (searched after the first <skip> characters of the match), replace the rest with ***, and
+# add <tail>. If the kept part opened a quote that the match closes (-U 'user%pass'), the closing quote
+# is added back so the line stays balanced. A match without sep is left alone.
+function mask_after(s, re, sep, skip, tail,    out, m, t, last, keep, tl) {
+  out = ""
+  while (match(s, re) && RLENGTH > 0) {
+    m = substr(s, RSTART, RLENGTH)
+    t = index(substr(m, skip + 1), sep)
+    if (t > 0) {
+      keep = substr(m, 1, skip + t)
+      last = substr(m, length(m), 1)
+      tl = tail
+      if ((last == "'" || last == "\"") && index(keep, last) > 0) tl = tl last
+      m = keep "***" tl
+    }
+    out = out substr(s, 1, RSTART - 1) m
+    s = substr(s, RSTART + RLENGTH)
+  }
+  return out s
+}
+function mask_cmd(cmd,    rest, tool, arg) {
+  rest = cmd
+  sub(/^[ \t]*(sudo[ \t]+)?/, "", rest)
+  tool = rest
+  sub(/[ \t].*$/, "", tool)
+  sub(/^.*\//, "", tool)
+  if (index(" " tools " ", " " tool " ") == 0) return cmd
+  arg = "('[^']*'|\"[^\"]*\"|[^ \t]+)"            # one shell word, optionally quoted
+
+  # every wrapped tool: --password/--pass (with = or a space) and user:pass@ in a URL
+  cmd = mask_after(cmd, "--pass(word)?=" arg, "=", 0, "")
+  cmd = mask_after(cmd, "--pass(word)?[ \t]+" arg, " ", 0, "")
+  cmd = mask_after(cmd, "://[^/@ \t:]*:[^/@ \t]*@", ":", 3, "@")
+
+  if (tool == "sshpass" || tool == "evil-winrm" || tool == "rdesktop" || tool == "ncftp")
+    cmd = mask_after(cmd, "[ \t]-p[ \t]+" arg, " ", 3, "")      # -p PASS (for ssh/nc/psql -p is a port: untouched)
+  if (tool == "evil-winrm")
+    cmd = mask_after(cmd, "[ \t]-H[ \t]+" arg, " ", 3, "")      # NTLM hash
+  if (tool == "mysql")
+    cmd = mask_after(cmd, "[ \t]-p" arg, "p", 2, "")            # -pPASS (attached; a bare -p just prompts)
+  if (tool == "smbclient")
+    cmd = mask_after(cmd, "(-U[ \t]*|--user=)" arg, "%", 0, "") # -U user%pass
+  if (tool == "xfreerdp" || tool == "remmina")
+    cmd = mask_after(cmd, "/g?p(th)?:" arg, ":", 0, "")         # /p:PASS  /pth:HASH  /gp:GATEWAYPASS
+  if (tool == "lftp")
+    cmd = mask_after(cmd, "-u[ \t]+[^ \t,]+," arg, ",", 3, "")  # -u user,pass
+  if (tool == "ncat")
+    cmd = mask_after(cmd, "--proxy-auth[= \t]+" arg, ":", 0, "")
+  return cmd
+}
+AWK
+
 # clean_log <raw>: print the raw log as plain text
 clean_log() {
   local raw="$1"
@@ -143,7 +218,7 @@ build_log() {
     clean_log "$f"
     echo
   done > "$tmp"
-  chmod 644 "$tmp"
+  chmod 600 "$tmp"                                  # it holds everything you typed, passwords included
   mv "$tmp" "$dir/session-$name.log"
 }
 
@@ -155,6 +230,7 @@ list_boxes() {
     [[ -f "${d}box.env" ]] || continue
     found=1
     n="$(basename -- "$d")"
+    # shellcheck source=/dev/null
     ip="$(. "${d}box.env"; echo "${IP:-}")"
     done_count="$(grep -cE '^- \[[xX]\] (local|proof)\.txt' "${d}notes/notes.md" 2>/dev/null || true)"
     printf '%-26s %-18s %s/2\n' "$n" "${ip:--}" "${done_count:-0}"
@@ -197,25 +273,21 @@ ordered_screenshots() {
 #   - trivial commands (ls, cd, pwd, clear, history, exit, note, shot, ...) are left out
 #   - `addcred user:pass ...` is shown as `addcred user:***` so passwords never reach the report
 chrono_log() {
-  local dir="$1" name="$2" t hist="$dir/.bash_history_$2" tl="$dir/notes/timeline.md" cap="$dir/screenshots/captions.tsv"
+  local dir="$1" name="$2" t hist tl cap
+  hist="$dir/.bash_history_$name"
+  tl="$dir/notes/timeline.md"
+  cap="$dir/screenshots/captions.tsv"
   t="$(mktemp -d)"
 
   # commands: "<epoch>\tC\t<command>"  (multi-line commands are joined with \036)
   if [[ -s "$hist" ]]; then
-    awk '
+    # $MASK_AWK supplies mask_cmd(), shared with the live timeline notes (see its comment above)
+    awk -v tools="$MKBOX_NET_CMDS" "$MASK_AWK"'
       function flush() {
         if (cmd == "") return
         if (cmd ~ /^[ \t]*(ls|ll|la|cd|pwd|clear|history|exit|logout|boxinfo|boxcd|note|shot|cleanlog|proofcmd|report)([ \t]|$)/) { cmd = ""; return }
         if (match(cmd, /^addcred +[^: ]+:/)) cmd = substr(cmd, 1, RLENGTH) "***"
-        # best-effort password masking for the net-command wrappers (ssh, ftp, rdp, ...); same
-        # limits as addcred/_netmask above - see README. The raw session log always has the real command.
-        if (cmd ~ /^[ \t]*(ssh|sshpass|ftp|sftp|ncftp|lftp|smbclient|rdesktop|xfreerdp|remmina|nc|ncat|netcat|telnet|mysql|psql|evil-winrm)([ \t]|$)/) {
-          gsub(/ -p [^ \t]+/, " -p ***", cmd)
-          gsub(/ -P [^ \t]+/, " -P ***", cmd)
-          gsub(/ --password[= ][^ \t]+/, " --password=***", cmd)
-          gsub(/ --pass[= ][^ \t]+/, " --pass=***", cmd)
-          gsub(/:\/\/[^\/@ \t]*@/, "://***@", cmd)
-        }
+        cmd = mask_cmd(cmd)
         printf "%s\tC\t%s\n", ep, cmd
         cmd = ""
       }
@@ -285,14 +357,16 @@ md_filelist() {
   local out
   out="$(files_by_mtime "$1")"
   if [[ -n "$out" ]]; then
-    sed 's/^/- /' <<<"$out"
+    printf '%s\n' "- ${out//$'\n'/$'\n'- }"
   else
     echo "_none_"
   fi
 }
 
 # warn_secrets <box_dir> <path>...: warn if a password recorded in creds/creds.txt also appears in
-# the given files or folders (relative to the box). Passwords under 4 characters are skipped.
+# the given files or folders (relative to the box). Passwords under 4 characters are skipped. The
+# `addcred user:pass` line you typed is in the session log by design, so lines containing "addcred "
+# don't count; anything else (a note, a command, a pasted file) does.
 warn_secrets() {
   local dir="$1"; shift
   local f="$dir/creds/creds.txt" line cred user pass hits
@@ -303,7 +377,8 @@ warn_secrets() {
     user="${cred%%:*}"
     pass="${cred#*:}"
     [[ ${#pass} -ge 4 ]] || continue
-    hits="$(cd "$dir" && grep -rIlF -- "$pass" "$@" 2>/dev/null | paste -sd, || true)"
+    # shellcheck disable=SC2015  # "A && B || true" is intended: a failed lookup must never abort the report
+    hits="$(cd "$dir" && grep -rIHF -- "$pass" "$@" 2>/dev/null | grep -v 'addcred ' | cut -d: -f1 | sort -u | paste -sd, || true)"
     if [[ -n "$hits" ]]; then
       echo "WARNING: the password recorded for '$user' also appears in: $hits"
     fi
@@ -318,6 +393,7 @@ make_report() {
 
   mkdir -p "$rdir"
   md="$rdir/$name-report.md"
+  # shellcheck source=/dev/null
   ip="$(. "$dir/box.env"; echo "${IP:-}")"
 
   # make sure the cleaned log is current
@@ -401,6 +477,7 @@ make_report() {
       echo "_none recorded_"
     fi
   } > "$md"
+  chmod 600 "$md" 2>/dev/null || true
 
   # evidence tarball: only things that exist
   local items=() p
@@ -413,13 +490,15 @@ make_report() {
     items+=("creds")
   fi
   tar -czf "$rdir/$name-evidence.tar.gz" -C "$dir" "${items[@]}"
+  chmod 600 "$rdir/$name-evidence.tar.gz" 2>/dev/null || true
 
   echo "Report draft: $md"
   echo "Evidence:     $rdir/$name-evidence.tar.gz"
   echo "Included in tarball: ${items[*]}"
   if [[ "$with_creds" -eq 0 ]]; then
     echo "Left out: the creds/ and loot/ folders (use --creds to include creds/)."
-    echo "That only covers those folders. Notes, exploits and the session log are bundled as typed."
+    echo "That only covers those folders. Notes, exploits and the session log are bundled as typed"
+    echo "(the session log includes the addcred lines you typed, passwords and all)."
     warn_secrets "$dir" "${items[@]}"
   fi
 }
@@ -437,6 +516,7 @@ while [[ $# -gt 0 ]]; do
     -c|--clean)    MODE=clean ;;
     -r|--report)   MODE=report ;;
     -l|--list)     MODE=list ;;
+    -V|--version)  echo "mkbox $VERSION"; exit 0 ;;
     --creds)       WITH_CREDS=1 ;;
     -h|--help)     usage 0 ;;
     --)            shift; POSITIONAL+=("$@"); break ;;
@@ -484,7 +564,12 @@ if [[ "$MODE" == "report" ]]; then
   exit 0
 fi
 
-mkdir -p "$BOX_DIR"
+# New box or an existing one? (so a typo like `mkbox lmae` says it is creating something new)
+if [[ -f "$BOX_DIR/box.env" ]]; then BOX_STATE=existing; else BOX_STATE=new; fi
+if [[ ! -d "$BOX_DIR" ]]; then
+  mkdir -p "$BOX_DIR"
+  chmod 700 "$BOX_DIR" 2>/dev/null || true      # private by default: the logs hold everything you type
+fi
 for d in "${SUBDIRS[@]}"; do mkdir -p "$BOX_DIR/$d"; done
 
 # --- keep the box out of git by default; never overwrite one the user replaced themselves ---
@@ -580,10 +665,17 @@ _saveenv() {   # write IP / PORTS / UDP_PORTS to box.env atomically (temp file +
 # array: `${PROMPT_COMMAND:+...}` only ever inspects/expands element 0 of an array, so a multi-element
 # PROMPT_COMMAND array from .bashrc would otherwise silently lose everything past element 0. Converting
 # to the array form here runs every existing entry (as bash itself does for a string) plus ours.
-if ! declare -p PROMPT_COMMAND 2>/dev/null | grep -q '^declare -a'; then
-  PROMPT_COMMAND=("${PROMPT_COMMAND:-}")
+# Before bash 5.1 PROMPT_COMMAND can't be an array at all (bash would only ever run element 0), so
+# there we append to the plain string instead.
+if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+  if ! declare -p PROMPT_COMMAND 2>/dev/null | grep -q '^declare -a'; then
+    PROMPT_COMMAND=("${PROMPT_COMMAND:-}")
+  fi
+  PROMPT_COMMAND+=('history -a; _boxsync')
+else
+  # shellcheck disable=SC2178,SC2128  # intentional: before bash 5.1 it is only ever a plain string
+  PROMPT_COMMAND="history -a; _boxsync${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 fi
-PROMPT_COMMAND+=('history -a; _boxsync')
 
 PS1="\[\e[1;31m\][box:$BOX]\[\e[0m\] ${PS1:-\u@\h:\w\$ }"
 
@@ -591,14 +683,23 @@ PS1="\[\e[1;31m\][box:$BOX]\[\e[0m\] ${PS1:-\u@\h:\w\$ }"
 _sudo() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi; }
 # _unroot <file>...: sudo nmap -oA writes its output files as root; hand them back to the user
 # who's actually running the box shell (so they aren't stuck needing sudo just to read a scan).
+#   - regular user (the normal Kali setup): chown them back with sudo. The nmap run just before has
+#     the credentials cached, and -n means this can never hang on a password prompt.
+#   - root shell started with `sudo -i` / `sudo su`: give them to $SUDO_USER.
+# $SUDO_USER can't be used to detect the first case: sudo sets it only for the command it launches,
+# never in your own shell.
 _unroot() {
-  [ -n "${SUDO_USER:-}" ] || return 0
-  chown "$SUDO_USER" "$@" 2>/dev/null || true
+  if [ "$(id -u)" -eq 0 ]; then
+    [ -n "${SUDO_USER:-}" ] || return 0
+    chown "$SUDO_USER" "$@" 2>/dev/null || true
+  else
+    sudo -n chown "$(id -u):$(id -g)" "$@" 2>/dev/null || true
+  fi
 }
 
 # --- notes & navigation
 note()     { printf '%s  %s\n' "$(date '+%F %T')" "$*" >> "$BOX_DIR/notes/timeline.md"; }   # note "got creds for bob"
-boxcd()    { cd "$BOX_DIR/${1:-}"; }                                                         # boxcd nmap
+boxcd()    { cd "$BOX_DIR/${1:-}" || return; }                                               # boxcd nmap
 boxinfo() {                                                                                  # status overview
   echo "Box:    $BOX"
   echo "Target: ${IP:-<unset>}"
@@ -742,35 +843,25 @@ serve() {                                                                      #
 #     `sudo nc ...` is logged by history like any other command but not start/end-timestamped.
 #   - To run the real binary once without the wrapper: `command ssh ...` or `\ssh ...`.
 #   - To add more tools, add their names to MKBOX_NET_CMDS (or set it in your own ~/.bashrc, which
-#     loads before this file, and it will be respected).
+#     loads before this file, and it will be respected). Set it in the environment you run mkbox
+#     from if you also want the report's command timeline to mask passwords for those tools.
 #   - In a pipeline (`ssh host cmd | tee out`), $? after the pipeline is bash's normal pipeline
 #     status, same as without the wrapper.
-MKBOX_NET_CMDS="${MKBOX_NET_CMDS:-ssh sshpass ftp sftp ncftp lftp smbclient rdesktop xfreerdp remmina nc ncat netcat telnet mysql psql evil-winrm}"
+# (MKBOX_NET_CMDS itself is set and exported by mkbox before this shell starts.)
 
-# _netmask <args...>: best-effort password masking for the timeline note only (the raw session log
-# always has the real command - see Caveats). Handles "-p PASS" / "-P PASS" / "--password[=]PASS"
-# and a user:pass@host URL. Does NOT catch a password spelled some other tool-specific way, or one
-# typed at an interactive prompt (good - that one was never on the command line to begin with).
+# _netmask <tool> <args...>: the command line with passwords masked, for the timeline note only (the
+# raw session log always has the real command - see Caveats). It uses the same mask_cmd() as the
+# report (appended below as $MKBOX_MASK_AWK), so the two can't disagree. A password typed at an
+# interactive prompt was never on the command line, so there is nothing to mask.
 _netmask() {
-  local a prev="" out=()
-  for a in "$@"; do
-    case "$prev" in
-      -p|-P|--password|--pass) out+=('***'); prev=""; continue ;;
-    esac
-    case "$a" in
-      -p|-P|--password|--pass) out+=("$a"); prev="$a"; continue ;;
-      --password=*|--pass=*)   out+=("${a%%=*}=***") ;;
-      *://*@*)                 out+=("$(printf '%s' "$a" | sed -E 's#(://)[^/@ ]*@#\1***@#')") ;;
-      *)                       out+=("$a") ;;
-    esac
-    prev=""
-  done
-  printf '%s' "${out[*]}"
+  local masked
+  masked="$(printf '%s\n' "$*" | awk -v tools="$MKBOX_NET_CMDS" "$MKBOX_MASK_AWK"$'\n''{ print mask_cmd($0) }')"
+  printf '%s' "${masked#"$1" }"
 }
 _netlog() {
   local name="$1"; shift
   local start end dur rc shown
-  shown="$(_netmask "$@")"
+  shown="$(_netmask "$name" "$@")"
   note "$name: started${shown:+ ($shown)}"
   start=$(date +%s)
   command "$name" "$@"
@@ -812,14 +903,33 @@ echo "Dir:    $BOX_DIR"
 echo "Helpers: note shot boxinfo boxcd setip portscan udpscan svcscan serve addcred proofcmd cleanlog report"
 echo "Logged on connect/exit: $MKBOX_NET_CMDS"
 EOF
+# the masking program is shared with the report (see MASK_AWK above); %q makes it safe to source
+printf 'MKBOX_MASK_AWK=%q\n' "$MASK_AWK" >> "$RC_TMP"
 chmod 644 "$RC_TMP"
 mv -f "$RC_TMP" "$BOX_DIR/.box.rc"
 
-export BOX="$NAME" BOX_DIR MKBOX_BIN="$(readlink -f -- "$0")" MKBOX_IP_RE="$IP_RE"
+MKBOX_BIN="$(readlink -f -- "$0")"
+export BOX="$NAME" BOX_DIR MKBOX_BIN MKBOX_IP_RE="$IP_RE"
 
 if [[ "$NO_SHELL" -eq 1 ]]; then
-  echo "Created $BOX_DIR"
+  if [[ "$BOX_STATE" == new ]]; then
+    echo "Created $BOX_DIR"
+  else
+    echo "Box already exists, updated: $BOX_DIR"
+  fi
   exit 0
+fi
+
+if ! command -v script >/dev/null 2>&1; then
+  echo "mkbox: 'script' not found - install util-linux (or use -n to set up the box without a shell)" >&2
+  exit 1
+fi
+
+if [[ "$BOX_STATE" == new ]]; then
+  echo "mkbox: creating new box '$NAME' in $(dirname -- "$BOX_DIR")${IP:+ (target $IP)}"
+  [[ -n "$IP" ]] || echo "mkbox: no target IP given - set one inside the box with: setip <ip>"
+else
+  echo "mkbox: re-entering '$NAME'"
 fi
 
 cd "$BOX_DIR"
@@ -827,7 +937,9 @@ printf -v SHELL_CMD 'bash --rcfile %q -i' "$BOX_DIR/.box.rc"
 
 # One raw log per invocation, so a second tab on the same box never writes into this one.
 mkdir -p "$BOX_DIR/.sessions"
+chmod 700 "$BOX_DIR/.sessions" 2>/dev/null || true
 RAW="$BOX_DIR/.sessions/$(date '+%Y%m%d-%H%M%S')-$$.raw"
+( umask 077; : > "$RAW" )          # script keeps an existing file's mode, so the raw log stays private
 
 # script -f flushes after every write (safe if the VM/laptop dies), -q hides the banner.
 # Not exec'd: we need to regain control afterwards to clean the log.
