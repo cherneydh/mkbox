@@ -44,7 +44,8 @@ echo "$*" >> "${CHOWN_LOG:-/dev/null}"
 exec "$(PATH="${PATH#*:}" command -v chown)" "$@"
 STUB
 # serve backends: record the arguments instead of starting a server
-for tool in impacket-smbserver wsgidav python3-serve-stub; do
+for tool in impacket-smbserver wsgidav; do
+  # shellcheck disable=SC2016  # the stub script must expand $* and ${SERVE_LOG} when it runs, not now
   printf '#!/usr/bin/env bash\necho "%s $*" >> "${SERVE_LOG:-/dev/null}"\n' "$tool" > "$T/bin/$tool"
 done
 for tool in ssh sshpass; do
