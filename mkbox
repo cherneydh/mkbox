@@ -207,6 +207,15 @@ chrono_log() {
         if (cmd == "") return
         if (cmd ~ /^[ \t]*(ls|ll|la|cd|pwd|clear|history|exit|logout|boxinfo|boxcd|note|shot|cleanlog|proofcmd|report)([ \t]|$)/) { cmd = ""; return }
         if (match(cmd, /^addcred +[^: ]+:/)) cmd = substr(cmd, 1, RLENGTH) "***"
+        # best-effort password masking for the net-command wrappers (ssh, ftp, rdp, ...); same
+        # limits as addcred/_netmask above - see README. The raw session log always has the real command.
+        if (cmd ~ /^[ \t]*(ssh|sshpass|ftp|sftp|ncftp|lftp|smbclient|rdesktop|xfreerdp|remmina|nc|ncat|netcat|telnet|mysql|psql|evil-winrm)([ \t]|$)/) {
+          gsub(/ -p [^ \t]+/, " -p ***", cmd)
+          gsub(/ -P [^ \t]+/, " -P ***", cmd)
+          gsub(/ --password[= ][^ \t]+/, " --password=***", cmd)
+          gsub(/ --pass[= ][^ \t]+/, " --pass=***", cmd)
+          gsub(/:\/\/[^\/@ \t]*@/, "://***@", cmd)
+        }
         printf "%s\tC\t%s\n", ep, cmd
         cmd = ""
       }
@@ -225,6 +234,8 @@ chrono_log() {
       cut -c22- "$t/n.txt" > "$t/n.tx"
       if [[ "$(wc -l < "$t/n.ep")" -eq "$(wc -l < "$t/n.tx")" ]]; then
         paste -d '\t' "$t/n.ep" <(sed 's/^/N\t/' "$t/n.tx") > "$t/n.tsv"
+      else
+        echo "mkbox: WARNING: couldn't parse one or more timestamps in notes/timeline.md (GNU date required) - timeline notes left out of the report's chronological log; they're still in notes/timeline.md and the evidence tarball" >&2
       fi
     fi
   fi
@@ -234,12 +245,17 @@ chrono_log() {
     cut -f2 "$cap" | date -f - +%s 2>/dev/null > "$t/s.ep" || true
     if [[ "$(wc -l < "$t/s.ep")" -eq "$(wc -l < "$cap")" ]]; then
       paste -d '\t' "$t/s.ep" <(awk -F'\t' '{printf "S\t%s\t%s\n", $1, $3}' "$cap") > "$t/s.tsv"
+    else
+      echo "mkbox: WARNING: couldn't parse one or more timestamps in screenshots/captions.tsv - screenshot captions left out of the report's chronological log; the images and captions are still in the Screenshots section and the evidence tarball" >&2
     fi
   fi
 
   cat "$t"/c.tsv "$t"/n.tsv "$t"/s.tsv 2>/dev/null | sort -s -t $'\t' -k1,1n > "$t/all.tsv" || true
   if [[ -s "$t/all.tsv" ]]; then
     sed 's/\t.*//; s/^/@/' "$t/all.tsv" | date -f - '+%F %T' 2>/dev/null > "$t/when.txt" || true
+    if [[ "$(wc -l < "$t/when.txt")" -ne "$(wc -l < "$t/all.tsv")" ]]; then
+      echo "mkbox: WARNING: couldn't re-format one or more merged timeline timestamps - the chronological log is incomplete for this run; re-run with \`mkbox -c\`/\`report\` after checking GNU date is installed" >&2
+    fi
     if [[ "$(wc -l < "$t/when.txt")" -eq "$(wc -l < "$t/all.tsv")" ]]; then
       paste -d '\t' "$t/when.txt" "$t/all.tsv" | awk -F'\t' '
         function close_block() { if (inblock) { print "```"; print ""; inblock = 0 } }
@@ -411,6 +427,10 @@ make_report() {
 MODE=run
 NO_SHELL=0
 WITH_CREDS=0
+POSITIONAL=()
+# Flags and the box name/IP can come in any order (mkbox lame -n, mkbox -n lame, ...); only the
+# first two non-flag args are ever used (box name, then IP), so this doesn't need getopt-style
+# option-argument handling.
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--no-shell) NO_SHELL=1 ;;
@@ -419,12 +439,13 @@ while [[ $# -gt 0 ]]; do
     -l|--list)     MODE=list ;;
     --creds)       WITH_CREDS=1 ;;
     -h|--help)     usage 0 ;;
-    --)            shift; break ;;
+    --)            shift; POSITIONAL+=("$@"); break ;;
     -*)            echo "mkbox: unknown option $1" >&2; usage 1 ;;
-    *)             break ;;
+    *)             POSITIONAL+=("$1") ;;
   esac
   shift
 done
+set -- "${POSITIONAL[@]}"
 
 if [[ "$MODE" == "list" ]]; then
   list_boxes
@@ -465,6 +486,11 @@ fi
 
 mkdir -p "$BOX_DIR"
 for d in "${SUBDIRS[@]}"; do mkdir -p "$BOX_DIR/$d"; done
+
+# --- keep the box out of git by default; never overwrite one the user replaced themselves ---
+if [[ ! -e "$BOX_DIR/.gitignore" ]]; then
+  printf '*\n' > "$BOX_DIR/.gitignore"
+fi
 
 # --- shared box state (IP, open ports) lives in box.env; every tab re-reads it at each prompt ---
 CUR_IP="$(env_get "$BOX_DIR" IP)"
@@ -529,21 +555,46 @@ export HISTCONTROL=ignorespace   # a leading space keeps a command out of histor
 shopt -s histappend
 
 # Shared state: re-read box.env before every prompt, so an IP/ports change made in another tab
-# (setip, portscan, udpscan) shows up here without restarting this shell.
-_boxsync() { [ -r "$BOX_DIR/box.env" ] && . "$BOX_DIR/box.env"; return 0; }
+# (setip, portscan, udpscan) shows up here without restarting this shell. Only re-sourced when its
+# mtime has actually changed, so a manual "IP=..." edit in this tab survives until something (this
+# tab's own setip/portscan, or another tab) next rewrites box.env - see the README gotcha.
+_BOXENV_SEEN=""
+_boxsync() {
+  local m
+  [ -r "$BOX_DIR/box.env" ] || return 0
+  m="$(date -r "$BOX_DIR/box.env" '+%s.%N' 2>/dev/null || true)"
+  [ "$m" != "$_BOXENV_SEEN" ] || return 0
+  . "$BOX_DIR/box.env"
+  _BOXENV_SEEN="$m"
+  return 0
+}
 _saveenv() {   # write IP / PORTS / UDP_PORTS to box.env atomically (temp file + rename)
   local t
   t="$(mktemp "$BOX_DIR/.box.env.XXXXXX")" || return 1
   printf 'export IP=%q\nexport PORTS=%q\nexport UDP_PORTS=%q\n' "${IP:-}" "${PORTS:-}" "${UDP_PORTS:-}" > "$t"
   chmod 644 "$t"
   mv -f "$t" "$BOX_DIR/box.env"
+  _BOXENV_SEEN="$(date -r "$BOX_DIR/box.env" '+%s.%N' 2>/dev/null || true)"   # we already have these values; don't re-source our own write
 }
-PROMPT_COMMAND="history -a; _boxsync${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+# Appending ourselves is safe whether PROMPT_COMMAND is unset, a plain string, or (bash 5.1+) an
+# array: `${PROMPT_COMMAND:+...}` only ever inspects/expands element 0 of an array, so a multi-element
+# PROMPT_COMMAND array from .bashrc would otherwise silently lose everything past element 0. Converting
+# to the array form here runs every existing entry (as bash itself does for a string) plus ours.
+if ! declare -p PROMPT_COMMAND 2>/dev/null | grep -q '^declare -a'; then
+  PROMPT_COMMAND=("${PROMPT_COMMAND:-}")
+fi
+PROMPT_COMMAND+=('history -a; _boxsync')
 
 PS1="\[\e[1;31m\][box:$BOX]\[\e[0m\] ${PS1:-\u@\h:\w\$ }"
 
 # ---------------------------------------------------------------- helpers
 _sudo() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi; }
+# _unroot <file>...: sudo nmap -oA writes its output files as root; hand them back to the user
+# who's actually running the box shell (so they aren't stuck needing sudo just to read a scan).
+_unroot() {
+  [ -n "${SUDO_USER:-}" ] || return 0
+  chown "$SUDO_USER" "$@" 2>/dev/null || true
+}
 
 # --- notes & navigation
 note()     { printf '%s  %s\n' "$(date '+%F %T')" "$*" >> "$BOX_DIR/notes/timeline.md"; }   # note "got creds for bob"
@@ -595,6 +646,7 @@ portscan() {                                                                    
   [ -n "${IP:-}" ] || { echo "IP not set (use: setip <ip>)"; return 1; }
   _archive_scan allports
   _sudo nmap -p- --min-rate 2000 -T4 -oA "$BOX_DIR/nmap/allports" "$IP" || return
+  _unroot "$BOX_DIR/nmap/allports".{nmap,gnmap,xml}
   local found
   found="$(grep -oE '[0-9]+/open/tcp' "$BOX_DIR/nmap/allports.gnmap" | cut -d/ -f1 | sort -un | paste -sd,)"
   _boxsync; PORTS="$found"; export PORTS; _saveenv         # shared with the other tabs
@@ -608,6 +660,7 @@ udpscan() {                                                                     
   echo "UDP scans are slow (minutes). Consider running this in a second tab."
   _archive_scan udp
   _sudo nmap -sU -sV --top-ports "$n" --open -oA "$BOX_DIR/nmap/udp" "$IP" || return
+  _unroot "$BOX_DIR/nmap/udp".{nmap,gnmap,xml}
   found="$(grep -oE '[0-9]+/open/udp' "$BOX_DIR/nmap/udp.gnmap" | cut -d/ -f1 | sort -un | paste -sd,)"
   maybe="$(grep -oE '[0-9]+/open\|filtered/udp' "$BOX_DIR/nmap/udp.gnmap" | cut -d/ -f1 | sort -un | paste -sd,)"
   _boxsync; UDP_PORTS="$found"; export UDP_PORTS; _saveenv
@@ -622,7 +675,7 @@ svcscan() {                                                                     
   [ -n "$p" ] || { echo "no ports: run portscan first, or: svcscan 22,80"; return 1; }
   case "$p" in *[!0-9,-]*) echo "svcscan: ports must be numbers or ranges separated by commas (got: $p)"; return 1 ;; esac
   _archive_scan services
-  _sudo nmap -sC -sV -p "$p" -oA "$BOX_DIR/nmap/services" "$IP" && note "svcscan on ports $p"
+  _sudo nmap -sC -sV -p "$p" -oA "$BOX_DIR/nmap/services" "$IP" && { _unroot "$BOX_DIR/nmap/services".{nmap,gnmap,xml}; note "svcscan on ports $p"; }
 }
 
 # --- screenshots (from the clipboard)
@@ -652,15 +705,86 @@ shot() {                                                                        
 }
 
 # --- file transfer
-serve() {                                                                                    # serve [port]  (serves transfer/; sudo for ports below 1024)
-  local port="${1:-80}"
-  case "$port" in ''|*[!0-9]*) echo "usage: serve [port]"; return 1 ;; esac
+serve() {                                                                      # serve [--bind <ip>] [port]  (serves transfer/; sudo for ports below 1024)
+  local bind="" port="80" args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --bind) bind="${2:-}"; shift 2 ;;
+      --bind=*) bind="${1#--bind=}"; shift ;;
+      *) port="$1"; shift ;;
+    esac
+  done
+  case "$port" in ''|*[!0-9]*) echo "usage: serve [--bind <ip>] [port]"; return 1 ;; esac
+  # Default (no --bind): python's http.server listens on every interface, so transfer/ is reachable
+  # from anywhere on your network, not just the target. Pass --bind <your-vpn-ip> (e.g. tun0) to
+  # restrict it, or --bind 127.0.0.1 if you're only serving over a tunnel/port-forward.
+  [ -n "$bind" ] && args+=(--bind "$bind")
   if [ "$port" -lt 1024 ] && [ "$(id -u)" -ne 0 ]; then
-    ( cd "$BOX_DIR/transfer" && sudo python3 -m http.server "$port" )
+    ( cd "$BOX_DIR/transfer" && sudo python3 -m http.server "${args[@]}" "$port" )
   else
-    ( cd "$BOX_DIR/transfer" && python3 -m http.server "$port" )
+    ( cd "$BOX_DIR/transfer" && python3 -m http.server "${args[@]}" "$port" )
   fi
 }
+
+# --- remote/transfer session logging -------------------------------------------------------
+# Connecting out (ssh, ftp, rdp, ...) is one of the most report-relevant things you do, so the
+# commands in $MKBOX_NET_CMDS get a timestamped start/end timeline note - same idea as portscan.
+#
+# This is pure passthrough, NOT a pty wrapper: `command "$name" "$@"` runs the real binary directly
+# in the foreground. Your terminal's stdin/stdout/stderr, job control, Ctrl-C, window resizes, and
+# the real exit code all reach it exactly as if you'd typed it without mkbox - nothing is piped,
+# backgrounded, or re-parented, so full-screen programs (vim or a shell over ssh), password
+# prompts, and `scp`/`sftp` progress bars behave normally. A wrapper is only installed for a name
+# if that binary is actually on PATH, so nothing is ever shadowed by a "command not found".
+#
+# Known, documented gaps (same spirit as addcred/warn_secrets - see README):
+#   - sudo bypasses the wrapper (sudo resolves the real binary via PATH, not shell functions), so
+#     `sudo nc ...` is logged by history like any other command but not start/end-timestamped.
+#   - To run the real binary once without the wrapper: `command ssh ...` or `\ssh ...`.
+#   - To add more tools, add their names to MKBOX_NET_CMDS (or set it in your own ~/.bashrc, which
+#     loads before this file, and it will be respected).
+#   - In a pipeline (`ssh host cmd | tee out`), $? after the pipeline is bash's normal pipeline
+#     status, same as without the wrapper.
+MKBOX_NET_CMDS="${MKBOX_NET_CMDS:-ssh sshpass ftp sftp ncftp lftp smbclient rdesktop xfreerdp remmina nc ncat netcat telnet mysql psql evil-winrm}"
+
+# _netmask <args...>: best-effort password masking for the timeline note only (the raw session log
+# always has the real command - see Caveats). Handles "-p PASS" / "-P PASS" / "--password[=]PASS"
+# and a user:pass@host URL. Does NOT catch a password spelled some other tool-specific way, or one
+# typed at an interactive prompt (good - that one was never on the command line to begin with).
+_netmask() {
+  local a prev="" out=()
+  for a in "$@"; do
+    case "$prev" in
+      -p|-P|--password|--pass) out+=('***'); prev=""; continue ;;
+    esac
+    case "$a" in
+      -p|-P|--password|--pass) out+=("$a"); prev="$a"; continue ;;
+      --password=*|--pass=*)   out+=("${a%%=*}=***") ;;
+      *://*@*)                 out+=("$(printf '%s' "$a" | sed -E 's#(://)[^/@ ]*@#\1***@#')") ;;
+      *)                       out+=("$a") ;;
+    esac
+    prev=""
+  done
+  printf '%s' "${out[*]}"
+}
+_netlog() {
+  local name="$1"; shift
+  local start end dur rc shown
+  shown="$(_netmask "$@")"
+  note "$name: started${shown:+ ($shown)}"
+  start=$(date +%s)
+  command "$name" "$@"
+  rc=$?
+  end=$(date +%s); dur=$((end - start))
+  note "$name: ended (exit $rc, ${dur}s)"
+  return $rc
+}
+for _mkbox_netcmd in $MKBOX_NET_CMDS; do
+  if command -v "$_mkbox_netcmd" >/dev/null 2>&1; then
+    eval "$_mkbox_netcmd() { _netlog '$_mkbox_netcmd' \"\$@\"; }"
+  fi
+done
+unset _mkbox_netcmd
 
 # --- creds & proof
 addcred() {                                                                                  # addcred user:pass [where found]
@@ -686,6 +810,7 @@ echo "Box:    $BOX"
 echo "Target: \$IP=${IP:-<unset>}"
 echo "Dir:    $BOX_DIR"
 echo "Helpers: note shot boxinfo boxcd setip portscan udpscan svcscan serve addcred proofcmd cleanlog report"
+echo "Logged on connect/exit: $MKBOX_NET_CMDS"
 EOF
 chmod 644 "$RC_TMP"
 mv -f "$RC_TMP" "$BOX_DIR/.box.rc"
