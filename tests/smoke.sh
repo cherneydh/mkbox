@@ -48,9 +48,13 @@ for tool in impacket-smbserver wsgidav python3; do
   # shellcheck disable=SC2016  # the stub script must expand $* and ${SERVE_LOG} when it runs, not now
   printf '#!/usr/bin/env bash\necho "%s $*" >> "${SERVE_LOG:-/dev/null}"\n' "$tool" > "$T/bin/$tool"
 done
-for tool in ssh sshpass; do
+for tool in ssh; do
   printf '#!/usr/bin/env bash\necho "stub %s $*"\n' "$tool" > "$T/bin/$tool"
 done
+# sshpass must not echo its arguments (the test password would then be "remote output")
+printf '#!/usr/bin/env bash\necho "stub sshpass ran"\n' > "$T/bin/sshpass"
+# nc: 50 lines of output, to exercise transcript truncation
+printf '#!/usr/bin/env bash\nseq 1 50\n' > "$T/bin/nc"
 chmod +x "$T/bin/"*
 export CHOWN_LOG="$T/chown.log"
 export SERVE_LOG="$T/serve.log"
@@ -83,6 +87,7 @@ printf '%s\n' \
   'addcred bob:Hunter2pw ssh' \
   'ssh -p 2222 user@10.10.10.9' \
   'sshpass -p Sup3rSecret ssh admin@10.10.10.9' \
+  'nc 10.10.10.9 80' \
   'exit' | "$MK" smoke 10.10.10.9 > "$T/session.out" 2>&1
 check "banner says re-entering"          has "$T/session.out" "re-entering 'smoke'"
 check "portscan set \$PORTS"             has smoke/notes/timeline.md "portscan: open ports 22,80"
@@ -136,8 +141,27 @@ check "timeline: evil-winrm -p masked"   has "$R" "evil-winrm -i 10.10.10.9 -u a
 check "timeline: serve --auth masked"    has "$R" "serve --smb --share loot --auth bob:***"
 check "timeline: serve --auth= quoted masked" has "$R" "serve --smb --auth='carl:***'"
 check "no real password left in report"  bash -c "! grep -qE 'Secret123|Passw0rd|Sup3rSecret|Hunter2pw|Sm8Secret|Qu0tedPw' '$R'"
+check "transcript: ssh block labelled"   has "$R" "**[ssh session transcript]** (until "
+check "transcript: ssh output captured"  has "$R" "stub ssh -p 2222 user@10.10.10.9"
+check "transcript: sshpass block labelled" has "$R" "**[sshpass session transcript]**"
+check "transcript: nc block labelled"    has "$R" "**[nc session transcript]**"
+check "transcript: nc output present"   bash -c "grep -qx '50' '$R'"
+check "transcript: exit code shown"      has "$R" ", exit 0)"
+check "transcript: markers not in report text" bash -c "! grep -q '\[mkbox >>>' '$R'"
 "$MK" -r --creds smoke > /dev/null 2>&1
 check "--creds puts creds/ in the tarball" bash -c "tar -tzf smoke/report/smoke-evidence.tar.gz | grep -q '^creds/creds.txt'"
+MKBOX_TRANSCRIPT_LINES=10 "$MK" -r smoke > /dev/null 2>&1
+check "transcript: long output is shortened" has "$R" "lines omitted"
+check "transcript: shortened keeps the ends" bash -c "grep -qx '1' '$R' && grep -qx '50' '$R' && ! grep -qx '25' '$R'"
+MKBOX_TRANSCRIPT_LINES=0 "$MK" -r smoke > /dev/null 2>&1
+check "transcript: 0 = never shortened"  bash -c "grep -qx '25' '$R' && ! grep -q 'lines omitted' '$R'"
+# a connection whose end marker never reached the log (terminal closed mid-session)
+printf '[mkbox >>> ssh started 2020-01-01 00:00:01]\r\nlost connection output\r\n' > smoke/.sessions/20200101-000000-1.raw
+"$MK" -r smoke > /dev/null 2>&1
+check "transcript: unfinished connection noted" has "$R" "the log ended before the connection did"
+check "transcript: unfinished text kept"  has "$R" "lost connection output"
+rm -f smoke/.sessions/20200101-000000-1.raw
+"$MK" -c smoke > /dev/null 2>&1
 echo "bob's password is Hunter2pw (oops)" >> smoke/notes/notes.md
 "$MK" -r smoke > "$T/r2.out" 2>&1
 check "leaked password in notes triggers a warning" has "$T/r2.out" "notes/notes.md"

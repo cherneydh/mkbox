@@ -337,7 +337,8 @@ ordered_screenshots() {
 #   - trivial commands (ls, cd, pwd, clear, history, exit, note, shot, ...) are left out
 #   - `addcred user:pass ...` is shown as `addcred user:***` so passwords never reach the report
 chrono_log() {
-  local dir="$1" name="$2" t hist tl cap
+  local dir="$1" name="$2" t hist tl cap log
+  log="$dir/session-$name.log"
   hist="$dir/.bash_history_$name"
   tl="$dir/notes/timeline.md"
   cap="$dir/screenshots/captions.tsv"
@@ -386,7 +387,54 @@ chrono_log() {
     fi
   fi
 
-  cat "$t"/c.tsv "$t"/n.tsv "$t"/s.tsv 2>/dev/null | sort -s -t $'\t' -k1,1n > "$t/all.tsv" || true
+  # connection transcripts: "<epoch>\tT\t<tool>\037<end info>\037<text>" (lines joined with \036). Cut from the
+  # cleaned session log between the markers the ssh/ftp/... wrappers print (see _netlog); long ones are
+  # shortened to the first and last half of $MKBOX_TRANSCRIPT_LINES lines (default 300, 0 = never).
+  if [[ -s "$log" ]]; then
+    awk -v max="${MKBOX_TRANSCRIPT_LINES:-300}" '
+      function finish(info,    s, e, i, h, cnt, body) {
+        s = 1; e = n
+        while (s <= e && buf[s] ~ /^[ \t]*$/) s++
+        while (e >= s && buf[e] ~ /^[ \t]*$/) e--
+        cnt = e - s + 1; body = ""
+        if (max > 0 && cnt > max) {
+          h = int(max / 2); if (h < 1) h = 1
+          for (i = s; i < s + h; i++) body = body (body == "" ? "" : "\036") buf[i]
+          body = body "\036[... " (cnt - 2 * h) " lines omitted - the full text is in the session log ...]"
+          for (i = e - h + 1; i <= e; i++) body = body "\036" buf[i]
+        } else {
+          for (i = s; i <= e; i++) body = body (i == s ? "" : "\036") buf[i]
+        }
+        printf "%s\t%s\037%s\037%s\n", sts, tool, info, body
+        active = 0; n = 0
+      }
+      /^===== session / { if (active) finish("the log ended before the connection did"); next }
+      /^\[mkbox >>> [^ ]+ started [0-9-]+ [0-9:]+\]$/ {
+        if (active) finish("the log ended before the connection did")
+        tool = $3; sts = $5 " " substr($6, 1, 8); sdate = $5; active = 1; n = 0; next
+      }
+      /^\[mkbox <<< [^ ]+ ended [0-9-]+ [0-9:]+ exit [0-9]+\]$/ {
+        if (active) {
+          rc = substr($8, 1, length($8) - 1); ets = substr($6, 1, 8)
+          if ($5 != sdate) ets = $5 " " ets
+          finish("until " ets ", exit " rc)
+        }
+        next
+      }
+      active { line = $0; gsub(/\t/, "    ", line); buf[++n] = line }
+      END { if (active) finish("the log ended before the connection did") }
+    ' "$log" > "$t/t.raw" || true
+    if [[ -s "$t/t.raw" ]]; then
+      cut -f1 "$t/t.raw" | date -f - +%s 2>/dev/null > "$t/t.ep" || true
+      if [[ "$(wc -l < "$t/t.ep")" -eq "$(wc -l < "$t/t.raw")" ]]; then
+        paste -d '\t' "$t/t.ep" <(cut -f2- "$t/t.raw" | sed 's/^/T\t/') > "$t/t.tsv"
+      else
+        echo "mkbox: WARNING: couldn't parse a connection start time in session-$name.log (GNU date required) - connection transcripts left out of the report's chronological log; they're still in the session log" >&2
+      fi
+    fi
+  fi
+
+  cat "$t"/c.tsv "$t"/n.tsv "$t"/s.tsv "$t"/t.tsv 2>/dev/null | sort -s -t $'\t' -k1,1n > "$t/all.tsv" || true
   if [[ -s "$t/all.tsv" ]]; then
     sed 's/\t.*//; s/^/@/' "$t/all.tsv" | date -f - '+%F %T' 2>/dev/null > "$t/when.txt" || true
     if [[ "$(wc -l < "$t/when.txt")" -ne "$(wc -l < "$t/all.tsv")" ]]; then
@@ -404,6 +452,16 @@ chrono_log() {
             printf "[%s] $ %s\n", when, text
           } else if (kind == "N") {
             close_block(); printf "- **%s** - %s\n", when, text; bullet = 1
+          } else if (kind == "T") {
+            close_block()
+            n = index(text, "\037"); tl = substr(text, 1, n - 1); text = substr(text, n + 1)
+            n = index(text, "\037"); info = substr(text, 1, n - 1); body = substr(text, n + 1)
+            printf "- **%s** - **[%s session transcript]** (%s)\n", when, tl, info
+            if (body != "") {
+              gsub(/\036/, "\n", body)
+              print ""; print "````text"; print body; print "````"; print ""
+              bullet = 0
+            } else { print "  _(no output)_"; bullet = 1 }
           } else if (kind == "S") {
             close_block()
             n = index(text, "\t"); file = substr(text, 1, n - 1); c = substr(text, n + 1)
@@ -1059,10 +1117,14 @@ _netlog() {
   local start end dur rc shown
   shown="$(_netmask "$name" "$@")"
   note "$name: started${shown:+ ($shown)}"
+  # One-line markers go to the terminal (so `script` records them) when stderr is a terminal. The report
+  # uses them to cut this connection's transcript out of the session log (see chrono_log).
+  if [ -t 2 ]; then printf '[mkbox >>> %s started %s]\n' "$name" "$(date '+%F %T')" >&2; fi
   start=$(date +%s)
   command "$name" "$@"
   rc=$?
   end=$(date +%s); dur=$((end - start))
+  if [ -t 2 ]; then printf '\n[mkbox <<< %s ended %s exit %s]\n' "$name" "$(date '+%F %T')" "$rc" >&2; fi
   note "$name: ended (exit $rc, ${dur}s)"
   return $rc
 }

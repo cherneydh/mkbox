@@ -16,6 +16,11 @@
   server starts (uses `--bind`, else your `tun0` address).
 - **`serve --auth` is masked in reports**, like `sshpass -p`.
 - **`Happy Hacking :)`** when a new box is created.
+- **Connection transcripts in the report.** What you type and see inside an `ssh`, `ftp`, `smbclient`,
+  `nc`, ... session is now included in the report's Timeline at the connection's start time, labelled
+  with the tool, end time and exit code (long ones are shortened; `MKBOX_TRANSCRIPT_LINES`). The wrappers
+  print a one-line marker to the terminal at start and end, which the report uses to find the transcript.
+  Transcripts are not password-masked. See the README.
 
 ## 1.0.2
 

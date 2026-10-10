@@ -240,7 +240,7 @@ Connecting out to the target is one of the most report-relevant things you do, s
 2026-10-09 18:04:41  ssh: ended (exit 0, 33s)
 ```
 
-**This is passthrough, not a new feature to interact with.** Each wrapper runs the real binary directly, in the foreground, with your terminal exactly as it would be without mkbox: interactive password prompts, full-screen programs (`vim` or a shell over `ssh`), `scp`/`sftp` progress bars, Ctrl-C, and the real exit code all behave normally. Nothing is piped, backgrounded, or given its own pty. A command is only wrapped if that binary is actually on your `PATH` when the box shell starts, so nothing is ever shadowed by a "command not found."
+**This is passthrough, not a new feature to interact with.** Each wrapper runs the real binary directly, in the foreground, with your terminal exactly as it would be without mkbox: interactive password prompts, full-screen programs (`vim` or a shell over `ssh`), `scp`/`sftp` progress bars, Ctrl-C, and the real exit code all behave normally. Nothing is piped, backgrounded, or given its own pty. The one visible addition is a marker line printed to the terminal when the connection starts and ends (`[mkbox >>> ssh started 2026-10-09 18:04:08]` / `[mkbox <<< ssh ended 2026-10-09 18:04:41 exit 0]`, only when stderr is a terminal); the report uses them to find the connection's transcript in the session log. A command is only wrapped if that binary is actually on your `PATH` when the box shell starts, so nothing is ever shadowed by a "command not found."
 
 - **Password masking is best-effort.** The timeline note above and the report's command log use the same masking rules (one shared piece of code), and each tool only gets the rules that fit it. For example `ssh -p 2222` is a port and is left alone, while `sshpass -p` is a password and is masked:
 
@@ -276,11 +276,25 @@ Cleanup behaves like a simple terminal: carriage returns and backspaces move a c
 
 ### The chronological log
 
-The **Timeline** section merges three sources by time:
+The **Timeline** section merges four sources by time:
 
 - **commands** from the box's history file, shown in code blocks with a timestamp
 - **notes** from `notes/timeline.md`
 - **screenshots** from `screenshots/captions.tsv`, listed with file name and caption (the images themselves are embedded in the **Screenshots** section)
+- **connection transcripts** from the session log: for every `ssh`, `ftp`, `smbclient`, `nc`, ... connection, everything that appeared in the terminal between the start and end markers, so the commands you typed on the target and their output are in the report too
+
+Each transcript sits at the connection's start time, under a bold label naming the tool, with when it ended and its exit code:
+
+````
+- **2026-10-09 18:04:08** - **[ssh session transcript]** (until 18:04:41, exit 0)
+
+```text
+bob@target:~$ id
+uid=1000(bob) gid=1000(bob) groups=1000(bob)
+```
+````
+
+Transcripts have no per-command timestamps (the terminal log has no timing); the connection's start, end and exit code are what is timed. A transcript is the raw terminal text: it includes the remote prompt and any password you typed that the remote side echoed, and, unlike the local command log, it is **not** password-masked. Transcripts longer than 300 lines are cut to the first and last 150 with a `[... N lines omitted ...]` line in between (the full text is always in the session log and the tarball); set `MKBOX_TRANSCRIPT_LINES=N` to change the limit, or `0` to never cut. A connection whose end marker never reached the log (terminal closed mid-session) is labelled `the log ended before the connection did`. `sudo`-prefixed or unwrapped tools have no markers, so no transcript block.
 
 What it leaves out or changes:
 
