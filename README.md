@@ -78,7 +78,7 @@ mkbox -V|--version
 | `mkbox -l`                 | Lists boxes in the current directory with target IP and proof status             |
 | `mkbox -V`                 | Prints the version                                                               |
 
-If the box doesn't exist yet, `mkbox` creates it and says so (`creating new box 'lame' in ...`); if it does, it says `re-entering 'lame'`. So a typo like `mkbox lmae` announces that it is making a new box instead of quietly doing it.
+If the box doesn't exist yet, `mkbox` creates it and says so (`creating new box 'lame' in ...`, followed by a `Happy Hacking :)`); if it does, it says `re-entering 'lame'`. So a typo like `mkbox lmae` announces that it is making a new box instead of quietly doing it.
 
 Flags and the box name/IP can be given in any order (`mkbox lame -n 10.10.10.3` works the same as `mkbox -n lame 10.10.10.3`); only the first two non-flag arguments are used, as box name and then IP.
 
@@ -185,6 +185,10 @@ serve --bind 10.10.14.2 --webdav 8080   # restrict to one address / pick a port
 - `--webdav` runs WsgiDAV (`sudo apt install wsgidav`) anonymously. It is writable, so a client can upload into `transfer/` too.
 - Ports below 1024 use `sudo` unless you are root. `--bind` limits which address listens; without it every interface does, so prefer `--bind <your-vpn-ip>`.
 - `--http` is accepted for completeness; it is the default.
+- `--auth` is SMB only (WebDAV is anonymous).
+- **Client hints.** When the server starts it prints copy-paste commands for the target (`wget`/`certutil`/`iwr` for HTTP, `copy \\ip\share\FILE .` and `net use ...` for SMB, the `DavWWWRoot` path and `curl -T` upload for WebDAV). The address used is your `--bind` value, else your `tun0` address, else the placeholder `<your-ip>`. The `net use` hint shows `<password>`, never the real one.
+- **Timeline notes.** Like the connection wrappers, `serve` writes a start and an end note to `notes/timeline.md`, for example `serve: smb started (port 445, share loot, user bob)` and `serve: smb ended (exit 130, 312s)` (130 is Ctrl-C). The password is never written to the note.
+- **`--auth` and the report.** The report's command log masks the password (`serve --smb --auth bob:***`), the same way it masks `sshpass -p`. The raw session log and your shell history still have the real command, as with every other command.
 
 ### Scratchpad
 
@@ -249,6 +253,7 @@ Connecting out to the target is one of the most report-relevant things you do, s
   | `xfreerdp`, `remmina` | `/p:PASS`, `/pth:HASH`, `/gp:PASS` |
   | `lftp` | `-u user,pass` |
   | `ncat` | `--proxy-auth user:pass` |
+  | `serve` (the box shell's helper) | `--auth user:PASS` / `--auth=user:PASS` |
 
   What it does not catch: tools outside the wrapped list (`curl -u`, `hydra`, `impacket-*`, ...), anything after the first command on a line (`a; mysql -pX`, pipes, `&&`), a password spelled some other way, and passwords with spaces that aren't quoted. A password typed at an interactive prompt was never on the command line, so there is nothing to mask. An optional `sudo` in front is ignored. The **raw session log always has the real command** (that's what `script` records), so masking only affects the generated report's command log and the timeline note, never your actual history.
 - **`sudo` bypasses the wrapper**, because `sudo` resolves the real binary from `PATH`, not from your shell's functions - `sudo nc ...` is still captured in your history and session log like any other command, just without the start/end timeline note.
