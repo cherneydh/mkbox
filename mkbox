@@ -378,7 +378,7 @@ _warn_secrets_keep() {
     case "$content" in *'addcred '*) continue ;; esac
     before="${content%%"$cred"*}"
     before="${before%"${before##*[![:space:]]}"}"            # rtrim trailing whitespace
-    case "addcred" in *"$before") continue ;; esac            # "", d, ed, red, cred, dcred, ddcred, addcred
+    [[ "addcred" == *"$before" ]] && continue                 # "", d, ed, red, cred, dcred, ddcred, addcred
     printf '%s:%s\n' "$file" "$lineno"
   done
 }
