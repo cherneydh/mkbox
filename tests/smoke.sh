@@ -48,9 +48,7 @@ for tool in impacket-smbserver wsgidav python3; do
   # shellcheck disable=SC2016  # the stub script must expand $* and ${SERVE_LOG} when it runs, not now
   printf '#!/usr/bin/env bash\necho "%s $*" >> "${SERVE_LOG:-/dev/null}"\n' "$tool" > "$T/bin/$tool"
 done
-for tool in ssh; do
-  printf '#!/usr/bin/env bash\necho "stub %s $*"\n' "$tool" > "$T/bin/$tool"
-done
+printf '#!/usr/bin/env bash\necho "stub ssh $*"\n' > "$T/bin/ssh"
 # sshpass must not echo its arguments (the test password would then be "remote output")
 printf '#!/usr/bin/env bash\necho "stub sshpass ran"\n' > "$T/bin/sshpass"
 # nc: 50 lines of output, to exercise transcript truncation
