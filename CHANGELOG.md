@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.1
+
+### Fixed
+
+- **The secrets warning could still fire for `addcred` alone, on a narrow terminal.** On a narrow
+  window, readline redraws a wrapped `addcred user:pass ...` line across more than one screen row;
+  `clean_log`'s line-based model can't follow that redraw (documented limitation), so the cleaned
+  session log could end up missing a leading piece of the word "addcred" - just enough that
+  `warn_secrets` no longer recognized the line as the one you typed, and warned about your own
+  `addcred` command. `warn_secrets` now also recognizes a credential preceded by a trailing
+  fragment of "addcred" ("ddcred", "d", ...), which is what that wrap actually leaves behind.
+
 ## 1.0.0
 
 First tagged release.
