@@ -1,0 +1,21 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          shellcheck mkbox tests/smoke.sh
+          # the box-shell rc is a heredoc inside mkbox; lint it as well
+          awk '/^cat > "\$RC_TMP" <<.EOF.$/{f=1;next} /^EOF$/{if(f){exit}} f' mkbox > "$RUNNER_TEMP/box.rc.sh"
+          shellcheck -s bash -S warning "$RUNNER_TEMP/box.rc.sh"
+
+      - name: smoke test
+        run: bash tests/smoke.sh
