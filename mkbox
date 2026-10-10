@@ -210,8 +210,13 @@ function mask_cmd(cmd,    rest, tool, arg) {
   tool = rest
   sub(/[ \t].*$/, "", tool)
   sub(/^.*\//, "", tool)
-  if (index(" " tools " ", " " tool " ") == 0) return cmd
   arg = "('[^']*'|\"[^\"]*\"|[^ \t]+)"            # one shell word, optionally quoted
+  if (tool == "serve") {                                         # the box shell's serve helper: --auth user:PASS
+    cmd = mask_after(cmd, "--auth=" arg, ":", 0, "")
+    cmd = mask_after(cmd, "--auth[ \t]+" arg, ":", 0, "")
+    return cmd
+  }
+  if (index(" " tools " ", " " tool " ") == 0) return cmd
 
   # every wrapped tool: --password/--pass (with = or a space) and user:pass@ in a URL
   cmd = mask_after(cmd, "--pass(word)?=" arg, "=", 0, "")
@@ -908,6 +913,38 @@ shot() {                                                                        
 }
 
 # --- file transfer
+_lhost() {                                                                     # our VPN address (tun0), for the client hints; "" if there is none
+  ip -4 -o addr show dev tun0 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }'
+}
+# _serve_hints <mode> <host> <port> <share> <user>: copy-paste client commands for the target
+_serve_hints() {
+  local mode="$1" h="$2" port="$3" share="$4" user="$5" p=""
+  echo "On the target (replace FILE):"
+  case "$mode" in
+    http)
+      [ "$port" != 80 ] && p=":$port"
+      echo "  Linux:   wget http://$h$p/FILE      or  curl -O http://$h$p/FILE"
+      echo "  Windows: certutil -urlcache -split -f http://$h$p/FILE FILE"
+      echo "           powershell iwr http://$h$p/FILE -OutFile FILE"
+      ;;
+    smb)
+      if [ -n "$user" ]; then
+        printf '  Windows: net use \\\\%s\\%s /user:%s <password>\n' "$h" "$share" "$user"
+      fi
+      printf '  Windows: copy \\\\%s\\%s\\FILE .          (upload: copy FILE \\\\%s\\%s\\)\n' "$h" "$share" "$h" "$share"
+      [ "$port" != 445 ] && echo "  (non-standard port $port: Windows' built-in SMB client can only use 445)"
+      ;;
+    webdav)
+      [ "$port" != 80 ] && p=":$port"
+      if [ "$port" = 80 ]; then
+        printf '  Windows: copy \\\\%s\\DavWWWRoot\\FILE .\n' "$h"
+      else
+        printf '  Windows: copy \\\\%s@%s\\DavWWWRoot\\FILE .\n' "$h" "$port"
+      fi
+      echo "  Linux:   curl -O http://$h$p/FILE      upload: curl -T FILE http://$h$p/"
+      ;;
+  esac
+}
 serve() {   # serve [--smb|--webdav|--http] [--bind <ip>] [--share <name>] [--auth user:pass] [port]  (serves transfer/)
   local mode="http" bind="" port="" share="share" auth="" tool="" t dir="$BOX_DIR/transfer"
   local usage="usage: serve [--smb|--webdav|--http] [--bind <ip>] [--share <name>] [--auth user:pass] [port]"
@@ -933,17 +970,18 @@ serve() {   # serve [--smb|--webdav|--http] [--bind <ip>] [--share <name>] [--au
   case "$share" in ''|*[!A-Za-z0-9._-]*) echo "serve: --share must be letters, digits, . _ -"; return 1 ;; esac
   if [ -n "$auth" ]; then
     case "$auth" in *:*) ;; *) echo "serve: --auth needs user:pass"; return 1 ;; esac
+    [ "$mode" = smb ] || { echo "serve: --auth is only supported with --smb"; return 1; }
   fi
   # Default (no --bind): every interface, so transfer/ is reachable from anywhere on your network, not
   # just the target. Pass --bind <your-vpn-ip> (e.g. tun0) to restrict it, or --bind 127.0.0.1 if
   # you're only serving over a tunnel/port-forward.
-  local pre=()
-  if [ "$port" -lt 1024 ] && [ "$(id -u)" -ne 0 ]; then pre=(sudo); fi   # privileged port
+  local cmd=()
+  if [ "$port" -lt 1024 ] && [ "$(id -u)" -ne 0 ]; then cmd=(sudo); fi   # privileged port
   case "$mode" in
     http)
-      local args=()
-      [ -n "$bind" ] && args+=(--bind "$bind")
-      ( cd "$dir" && "${pre[@]}" python3 -m http.server "${args[@]}" "$port" )
+      cmd+=(python3 -m http.server)
+      [ -n "$bind" ] && cmd+=(--bind "$bind")
+      cmd+=("$port")
       ;;
     smb)
       # impacket's smbserver (Kali: package python3-impacket, command impacket-smbserver)
@@ -951,25 +989,38 @@ serve() {   # serve [--smb|--webdav|--http] [--bind <ip>] [--share <name>] [--au
         if command -v "$t" >/dev/null 2>&1; then tool="$(command -v "$t")"; break; fi
       done
       [ -n "$tool" ] || { echo "serve: --smb needs impacket's smbserver:  sudo apt install python3-impacket"; return 1; }
-      local sargs=(-smb2support -port "$port")
-      [ -n "$bind" ] && sargs+=(-ip "$bind")
-      [ -n "$auth" ] && sargs+=(-username "${auth%%:*}" -password "${auth#*:}")
-      echo "SMB share: \\\\${bind:-<your-ip>}\\$share  ->  $dir"
-      "${pre[@]}" "$tool" "${sargs[@]}" "$share" "$dir"
+      cmd+=("$tool" -smb2support -port "$port")
+      [ -n "$bind" ] && cmd+=(-ip "$bind")
+      [ -n "$auth" ] && cmd+=(-username "${auth%%:*}" -password "${auth#*:}")
+      cmd+=("$share" "$dir")
       ;;
     webdav)
       # WsgiDAV (Kali: package wsgidav)
       tool="$(command -v wsgidav 2>/dev/null || true)"
       [ -n "$tool" ] || { echo "serve: --webdav needs WsgiDAV:  sudo apt install wsgidav   (or: pip install wsgidav cheroot)"; return 1; }
-      local wargs=(--host "${bind:-0.0.0.0}" --port "$port" --root "$dir")
-      if [ -n "$auth" ]; then
-        echo "serve: --auth is not supported with --webdav (anonymous only)"; return 1
-      fi
-      wargs+=(--auth anonymous)
-      echo "WebDAV: http://${bind:-<your-ip>}:$port/  ->  $dir"
-      "${pre[@]}" "$tool" "${wargs[@]}"
+      cmd+=("$tool" --host "${bind:-0.0.0.0}" --port "$port" --root "$dir" --auth anonymous)
       ;;
   esac
+
+  local h="${bind:-$(_lhost)}" start rc
+  h="${h:-<your-ip>}"
+  [ "$h" = 0.0.0.0 ] && h="<your-ip>"
+  echo "Serving $dir over $mode on port $port${bind:+ (bind $bind)}  -  Ctrl-C to stop"
+  _serve_hints "$mode" "$h" "$port" "$share" "${auth%%:*}"
+  # timeline note: what, where, who - never the password
+  local detail="port $port"
+  [ -n "$bind" ] && detail="$detail, bind $bind"
+  [ "$mode" = smb ] && detail="$detail, share $share"
+  [ -n "$auth" ] && detail="$detail, user ${auth%%:*}"
+  note "serve: $mode started ($detail)"
+  start=$(date +%s)
+  # A handled SIGINT keeps this function running after Ctrl-C, so the "ended" note below is written.
+  trap ':' INT
+  ( cd "$dir" && "${cmd[@]}" )
+  rc=$?
+  trap - INT
+  note "serve: $mode ended (exit $rc, $(( $(date +%s) - start ))s)"
+  return $rc
 }
 
 # --- remote/transfer session logging -------------------------------------------------------
@@ -1065,6 +1116,7 @@ export BOX="$NAME" BOX_DIR MKBOX_BIN MKBOX_IP_RE="$IP_RE"
 if [[ "$NO_SHELL" -eq 1 ]]; then
   if [[ "$BOX_STATE" == new ]]; then
     echo "Created $BOX_DIR"
+    echo "Happy Hacking :)"
   else
     echo "Box already exists, updated: $BOX_DIR"
   fi
@@ -1079,6 +1131,7 @@ fi
 if [[ "$BOX_STATE" == new ]]; then
   echo "mkbox: creating new box '$NAME' in $(dirname -- "$BOX_DIR")${IP:+ (target $IP)}"
   [[ -n "$IP" ]] || echo "mkbox: no target IP given - set one inside the box with: setip <ip>"
+  echo "Happy Hacking :)"
 else
   echo "mkbox: re-entering '$NAME'"
 fi
