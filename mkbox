@@ -113,6 +113,7 @@ pad_main() {
       ;;
     cmd)
       [[ $# -gt 0 && -n "$*" ]] || { echo "usage: pad cmd <command>   (inside the box shell, a bare 'pad cmd' saves your previous command)" >&2; return 1; }
+      # shellcheck disable=SC2016  # the backticks are a literal markdown fence, not a command substitution
       printf -- '- %s\n\n```\n%s\n```\n\n' "$(date '+%F %T')" "$*" >> "$f"
       ;;
     show|cat) cat -- "$f" ;;
