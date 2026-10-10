@@ -10,6 +10,12 @@
 - **Scratchpad.** `pad` inside the box shell (and `mkbox -p <box|-g>` outside it) keeps free-form
   notes and commands in `<box>/scratchpad.md`, or one global pad with `-g`. It persists across sessions
   and is kept out of the report and evidence tarball.
+- **`serve` timeline notes.** Start and end notes in `notes/timeline.md` (mode, port, bind, share,
+  user - never the password; the end note is written after Ctrl-C too).
+- **`serve` client hints.** Prints ready-to-paste download/upload commands for the target when a
+  server starts (uses `--bind`, else your `tun0` address).
+- **`serve --auth` is masked in reports**, like `sshpass -p`.
+- **`Happy Hacking :)`** when a new box is created.
 
 ## 1.0.2
 
