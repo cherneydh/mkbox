@@ -54,6 +54,7 @@ printf '#!/usr/bin/env bash\necho "stub sshpass ran"\n' > "$T/bin/sshpass"
 # nc: 50 lines of output, to exercise transcript truncation
 printf '#!/usr/bin/env bash\nseq 1 50\n' > "$T/bin/nc"
 # ip: knows one fact, our tun0 address, and only when FAKE_TUN0 is set (so most checks see "no VPN")
+# shellcheck disable=SC2016  # the stub script must expand ${FAKE_TUN0} and ${6} when it runs, not now
 printf '#!/usr/bin/env bash\n[ -n "${FAKE_TUN0:-}" ] && [ "${6:-}" = tun0 ] && echo "5: tun0    inet $FAKE_TUN0/23 scope global tun0"\nexit 0\n' > "$T/bin/ip"
 chmod +x "$T/bin/"*
 export CHOWN_LOG="$T/chown.log"
@@ -93,6 +94,7 @@ printf '%s\n' \
   'markproof bogus' \
   'exit' | FAKE_TUN0=10.10.14.7 "$MK" smoke 10.10.10.9 > "$T/session.out" 2>&1
 check "banner says re-entering"          has "$T/session.out" "re-entering 'smoke'"
+# shellcheck disable=SC2016  # literal text: the banner prints the characters $LHOST=
 check "banner shows our tun0 address"    has "$T/session.out" '$LHOST=10.10.14.7'
 check "markproof: local ticked with value" has smoke/notes/notes.md "- [x] local.txt: 0123abcd"
 check "markproof: root is an alias for proof" has smoke/notes/notes.md "- [x] proof.txt:"
@@ -145,6 +147,7 @@ check "report written"                   test -s "$R"
 check "timeline: markproof command left out" lacks "$R" "deadbeef"
 check "summary: open TCP ports"          has "$R" "- **Open TCP ports:** 22,80"
 check "summary: no tun0 -> attacker unknown" has "$R" "- **Attacker (this machine):** unknown"
+# shellcheck disable=SC2016  # the backticks are literal markdown in the report, not a command substitution
 check "summary: local.txt value filled in" has "$R" '- **local.txt:** captured (`0123abcd`)'
 check "summary: proof.txt captured"      has "$R" "- **proof.txt:** captured"
 check "ports table: header"              has "$R" "| Port | Proto | Service | Version |"
