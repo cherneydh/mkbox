@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0
+
+### Added
+
+- **`markproof local|proof [value]`.** Ticks `local.txt` / `proof.txt` in the Proof checklist of
+  `notes/notes.md` (`user` and `root` work as aliases), optionally storing the flag value on the line,
+  and writes a timeline note. `markproof -u local` unticks it (the stored value stays). `mkbox -l` and
+  `boxinfo` already read that checklist, so they now reflect it.
+- **`$LHOST`.** Your own VPN address (`tun0`, else `tap0`) is detected when the box shell starts, refreshed
+  at every prompt (so it follows a VPN reconnect), shown in the banner and `boxinfo`, and used for the
+  `serve` client hints when no `--bind` is given.
+- **The report fills itself in where it can.** The top of the report now has the attacker address,
+  open TCP/UDP ports (from `box.env`), nmap's service info line, and whether `local.txt` / `proof.txt`
+  are captured (with the value you stored). A new **Open ports (from nmap)** table (port, protocol,
+  service, version) is built from the newest `services` / `allports` / `udp` scans.
+
+### Changed
+
+- `markproof` commands are left out of the report's command log (the timeline note covers them).
+
 ## 1.1.0
 
 ### Added
