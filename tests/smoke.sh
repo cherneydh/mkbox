@@ -53,6 +53,8 @@ printf '#!/usr/bin/env bash\necho "stub ssh $*"\n' > "$T/bin/ssh"
 printf '#!/usr/bin/env bash\necho "stub sshpass ran"\n' > "$T/bin/sshpass"
 # nc: 50 lines of output, to exercise transcript truncation
 printf '#!/usr/bin/env bash\nseq 1 50\n' > "$T/bin/nc"
+# ip: knows one fact, our tun0 address, and only when FAKE_TUN0 is set (so most checks see "no VPN")
+printf '#!/usr/bin/env bash\n[ -n "${FAKE_TUN0:-}" ] && [ "${6:-}" = tun0 ] && echo "5: tun0    inet $FAKE_TUN0/23 scope global tun0"\nexit 0\n' > "$T/bin/ip"
 chmod +x "$T/bin/"*
 export CHOWN_LOG="$T/chown.log"
 export SERVE_LOG="$T/serve.log"
@@ -86,8 +88,23 @@ printf '%s\n' \
   'ssh -p 2222 user@10.10.10.9' \
   'sshpass -p Sup3rSecret ssh admin@10.10.10.9' \
   'nc 10.10.10.9 80' \
-  'exit' | "$MK" smoke 10.10.10.9 > "$T/session.out" 2>&1
+  'markproof local 0123abcd' \
+  'markproof root' \
+  'markproof bogus' \
+  'exit' | FAKE_TUN0=10.10.14.7 "$MK" smoke 10.10.10.9 > "$T/session.out" 2>&1
 check "banner says re-entering"          has "$T/session.out" "re-entering 'smoke'"
+check "banner shows our tun0 address"    has "$T/session.out" '$LHOST=10.10.14.7'
+check "markproof: local ticked with value" has smoke/notes/notes.md "- [x] local.txt: 0123abcd"
+check "markproof: root is an alias for proof" has smoke/notes/notes.md "- [x] proof.txt:"
+check "markproof: timeline note"         has smoke/notes/timeline.md "proof: local.txt marked done (0123abcd)"
+check "markproof: bad argument gives usage" has "$T/session.out" "usage: markproof local|proof"
+check "markproof: notes.md keeps its mode" bash -c "[ \"\$(stat -c %a smoke/notes/notes.md)\" != 600 ]"
+check "-l counts both proof lines"       bash -c "'$MK' -l | grep -q '^smoke .*2/2'"
+printf '%s\n' 'markproof -u local' 'exit' | "$MK" smoke > /dev/null 2>&1
+check "markproof -u: unticked, value kept" has smoke/notes/notes.md "- [ ] local.txt: 0123abcd"
+check "markproof -u: timeline note"      has smoke/notes/timeline.md "proof: local.txt unmarked"
+printf '%s\n' 'markproof local' 'exit' | "$MK" smoke > /dev/null 2>&1
+check "markproof: re-tick keeps old value" has smoke/notes/notes.md "- [x] local.txt: 0123abcd"
 check "portscan set \$PORTS"             has smoke/notes/timeline.md "portscan: open ports 22,80"
 # shellcheck disable=SC2016  # the single quotes are intentional: the inner bash expands $PORTS
 check "ports shared via box.env"         bash -c '. smoke/box.env && [ "$PORTS" = "22,80" ]'
@@ -120,10 +137,21 @@ now="$(date +%s)"
   echo "#$((now + 4))"; echo "evil-winrm -i 10.10.10.9 -u admin -p 'Passw0rd!'"
   echo "#$((now + 5))"; echo "serve --smb --share loot --auth bob:Sm8Secret"
   echo "#$((now + 6))"; echo "serve --smb --auth='carl:Qu0tedPw'"
+  echo "#$((now + 7))"; echo "markproof local deadbeef"
 } >> smoke/.bash_history_smoke
 "$MK" -r smoke > "$T/r1.out" 2>&1
 R=smoke/report/smoke-report.md
 check "report written"                   test -s "$R"
+check "timeline: markproof command left out" lacks "$R" "deadbeef"
+check "summary: open TCP ports"          has "$R" "- **Open TCP ports:** 22,80"
+check "summary: no tun0 -> attacker unknown" has "$R" "- **Attacker (this machine):** unknown"
+check "summary: local.txt value filled in" has "$R" '- **local.txt:** captured (`0123abcd`)'
+check "summary: proof.txt captured"      has "$R" "- **proof.txt:** captured"
+check "ports table: header"              has "$R" "| Port | Proto | Service | Version |"
+check "ports table: ssh row"             has "$R" "| 22 | tcp | ssh | - |"
+check "ports table: http row"            has "$R" "| 80 | tcp | http | - |"
+FAKE_TUN0=10.10.14.7 "$MK" -r smoke > /dev/null 2>&1
+check "summary: attacker = tun0 address" has "$R" "- **Attacker (this machine):** 10.10.14.7"
 check "report is mode 600"               mode "$R" 600
 check "evidence tarball written"         test -s smoke/report/smoke-evidence.tar.gz
 check "tarball is mode 600"              mode smoke/report/smoke-evidence.tar.gz 600
