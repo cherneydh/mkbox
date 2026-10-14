@@ -48,6 +48,7 @@ svcscan                      # default scripts + versions on the open ports
 udpscan                      # top-20 UDP ports (slow; try a second tab)
 note "anonymous FTP allowed" # timestamped timeline entry
 addcred bob:hunter2 "ssh"    # record a credential
+markproof local 3f2a...      # tick local.txt in the proof checklist (and store the flag)
 exit                         # leave; the session log is cleaned automatically
 
 mkbox -r lame                # build a report draft + evidence tarball
@@ -126,6 +127,7 @@ Entering a box starts a `bash` session (even if your login shell is zsh) with:
 - `HISTTIMEFORMAT="%F %T "` so `history` shows dates and times
 - a per-box history file, written after every command (not just on exit)
 - `$IP`, `$PORTS` and `$UDP_PORTS` kept in sync across tabs (see below), plus `$BOX` and `$BOX_DIR`
+- `$LHOST`, your own VPN address (`tun0`, else `tap0`; empty if neither exists). It is looked up again at every prompt, so it follows a VPN reconnect, and it is what the `serve` client hints use when you don't pass `--bind`
 - a `[box:name]` prefix in your prompt
 - a leading space on a command keeps it out of history (`HISTCONTROL=ignorespace`). That is the shell history only: `script` still records the command and its output in the session log, so a leading space does not keep a command out of the log or the evidence tarball
 
@@ -166,6 +168,7 @@ Available inside the box shell:
 | `ssh`, `ftp`, `sftp`, `smbclient`, `rdesktop`, `xfreerdp`, `nc`, `telnet`, `mysql`, ... | Logged automatically on connect/disconnect - see [Logging connections](#logging-connections-ssh-ftp-rdp-) |
 | `addcred user:pass [where]` | Appends to `creds/creds.txt`; the timeline records only the username                                              |
 | `proofcmd`                  | Prints one-liners to paste on a target to show proof file, user, hostname, and IP                                 |
+| `markproof local\|proof [value]` | Ticks `local.txt` / `proof.txt` in the Proof checklist of `notes/notes.md`, stores the optional value on that line, adds a timeline note. `user` / `root` are aliases; `markproof -u local` unticks (value kept) |
 | `cleanlog`                  | Rebuilds the cleaned session log mid-session                                                                      |
 | `report [--creds]`          | Same as `mkbox -r` for the current box                                                                            |
 
@@ -274,6 +277,15 @@ Cleanup behaves like a simple terminal: carriage returns and backspaces move a c
 - `<boxname>-report.md`: a draft assembled from your notes, a chronological log, nmap results, screenshots, exploit and loot filenames, and a credentials section.
 - `<boxname>-evidence.tar.gz`: `notes/`, `screenshots/`, `nmap/`, `exploits/`, `web/`, the cleaned session log, and the report draft.
 
+### What the report fills in for you
+
+Where the information exists, the top of the report is filled in without you writing anything:
+
+- **Summary lines:** target, your own address (`$LHOST`, or `unknown` when there is no `tun0`/`tap0`), open TCP and UDP ports (from `box.env`), the `Service Info:` line from `nmap/services.nmap` (usually the OS), and whether `local.txt` and `proof.txt` are captured, with the value you gave `markproof`. Run `markproof` before `mkbox -r`; the lines read from the checklist in `notes/notes.md`.
+- **Open ports (from nmap):** a table of port, protocol, service and version built from the newest scans: `nmap/services.gnmap` (or `nmap/allports.gnmap` if there is no service scan yet) plus `nmap/udp.gnmap`. Only ports nmap reports as `open` are listed. Older, time-stamped scan files are not used for the table (they are still in the **Nmap results** section).
+
+Nothing is guessed: a line or table with no data behind it is simply left out or reads `not recorded yet` / `none found`. Your own **Notes** section is copied as-is.
+
 ### The chronological log
 
 The **Timeline** section merges four sources by time:
@@ -298,7 +310,7 @@ Transcripts have no per-command timestamps (the terminal log has no timing); the
 
 What it leaves out or changes:
 
-- Trivial commands are skipped: `ls`, `ll`, `la`, `cd`, `pwd`, `clear`, `history`, `exit`, `logout`, and the helpers `note`, `shot`, `boxinfo`, `boxcd`, `cleanlog`, `proofcmd`, `report`.
+- Trivial commands are skipped: `ls`, `ll`, `la`, `cd`, `pwd`, `clear`, `history`, `exit`, `logout`, and the helpers `note`, `shot`, `boxinfo`, `boxcd`, `cleanlog`, `proofcmd`, `markproof`, `report`.
 - `addcred user:pass ...` appears as `addcred user:***`, so the password never reaches the report.
 - A password passed to a wrapped tool (`sshpass -p`, `mysql -pPASS`, `xfreerdp /p:`, `smbclient -U user%pass`, a `user:pass@host` URL, ...) is masked the same way as in the live timeline note - see [Logging connections](#logging-connections-ssh-ftp-rdp-) for the per-tool rules and what they don't catch.
 - Commands you start with a space aren't in your history, so they aren't in the log either (they are still in the session log).
