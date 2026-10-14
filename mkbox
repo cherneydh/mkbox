@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 # Written for bash 4.4+ (empty arrays under `set -u`, associative arrays); developed on 5.2.
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
@@ -350,7 +350,7 @@ chrono_log() {
     awk -v tools="$MKBOX_NET_CMDS" "$MASK_AWK"'
       function flush() {
         if (cmd == "") return
-        if (cmd ~ /^[ \t]*(ls|ll|la|cd|pwd|clear|history|exit|logout|boxinfo|boxcd|note|shot|cleanlog|proofcmd|report)([ \t]|$)/) { cmd = ""; return }
+        if (cmd ~ /^[ \t]*(ls|ll|la|cd|pwd|clear|history|exit|logout|boxinfo|boxcd|note|shot|cleanlog|proofcmd|markproof|report)([ \t]|$)/) { cmd = ""; return }
         if (match(cmd, /^addcred +[^: ]+:/)) cmd = substr(cmd, 1, RLENGTH) "***"
         cmd = mask_cmd(cmd)
         printf "%s\tC\t%s\n", ep, cmd
@@ -529,16 +529,74 @@ warn_secrets() {
   done < "$f"
 }
 
+# detect_lhost: our own VPN address (tun0, else tap0), "" if there is none. (The box shell has its own
+# copy of this, _lhost, because the rc file can't call back into this script on every prompt.)
+detect_lhost() {
+  local i a
+  for i in tun0 tap0; do
+    a="$(ip -4 -o addr show dev "$i" 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }' || true)"
+    if [[ -n "$a" ]]; then printf '%s\n' "$a"; return 0; fi
+  done
+  return 0
+}
+
+# proof_status <box_dir> <local|proof>: how the proof checklist in notes/notes.md reads, for the report
+proof_status() {
+  local line v
+  line="$(grep -m1 -E "^- \[[xX]\] $2\.txt:" "$1/notes/notes.md" 2>/dev/null || true)"
+  [[ -n "$line" ]] || { echo "not recorded yet"; return 0; }
+  v="${line#*:}"
+  v="${v#"${v%%[![:space:]]*}"}"                             # ltrim
+  if [[ -n "$v" ]]; then echo "captured (\`$v\`)"; else echo "captured"; fi
+}
+
+# ports_table <box_dir>: markdown table of the open ports nmap found, taken from the newest scans
+# (nmap/services.gnmap, or nmap/allports.gnmap when there is no service scan yet, plus nmap/udp.gnmap).
+# Prints nothing when there is nothing to show.
+ports_table() {
+  local dir="$1" files=() g rows
+  if [[ -f "$dir/nmap/services.gnmap" ]]; then files+=("$dir/nmap/services.gnmap")
+  elif [[ -f "$dir/nmap/allports.gnmap" ]]; then files+=("$dir/nmap/allports.gnmap"); fi
+  if [[ -f "$dir/nmap/udp.gnmap" ]]; then files+=("$dir/nmap/udp.gnmap"); fi
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  # gnmap line:  Host: IP ()<TAB>Ports: 22/open/tcp//ssh//OpenSSH 8.2/, 80/open/tcp//http///<TAB>...
+  # per port:    port/state/proto/owner/service/rpc-info/version/   (only "open" ports are listed)
+  rows="$(for g in "${files[@]}"; do
+    awk '
+      /^Host:/ && /Ports: / {
+        p = $0; sub(/^.*Ports: /, "", p); sub(/\t.*$/, "", p)
+        n = split(p, a, /, */)
+        for (i = 1; i <= n; i++) {
+          m = split(a[i], f, "/")
+          if (f[2] != "open") continue
+          ver = ""
+          for (j = 7; j < m; j++) ver = ver (j > 7 ? "/" : "") f[j]
+          svc = f[5]
+          gsub(/\|/, "\\|", ver); gsub(/\|/, "\\|", svc)
+          printf "%s\t%s\t%s\t%s\n", f[1], f[3], svc, ver
+        }
+      }' "$g" 2>/dev/null || true
+  done | sort -s -t $'\t' -k2,2 -k1,1n | awk -F'\t' '!seen[$1 FS $2]++')"
+  [[ -n "$rows" ]] || return 0
+  echo "| Port | Proto | Service | Version |"
+  echo "|------|-------|---------|---------|"
+  awk -F'\t' '{ printf "| %s | %s | %s | %s |\n", $1, $2, ($3 == "" ? "-" : $3), ($4 == "" ? "-" : $4) }' <<<"$rows"
+}
+
 # make_report <box_dir> <name> <with_creds 0|1>
 make_report() {
   local dir="$1" name="$2" with_creds="$3"
-  local rdir="$dir/report" md ip f out cap
+  local rdir="$dir/report" md ip f out cap lhost ports uports osinfo
   [[ -f "$dir/box.env" ]] || { echo "mkbox: $dir is not a box (no box.env)" >&2; exit 1; }
 
   mkdir -p "$rdir" "$dir/notes"
   md="$rdir/$name-report.md"
   # shellcheck source=/dev/null
   ip="$(. "$dir/box.env"; echo "${IP:-}")"
+  ports="$(env_get "$dir" PORTS)"
+  uports="$(env_get "$dir" UDP_PORTS)"
+  lhost="${LHOST:-$(detect_lhost)}"                          # LHOST is set when run from inside the box shell
+  osinfo="$(grep -h -m1 '^Service Info:' "$dir"/nmap/services.nmap 2>/dev/null | sed 's/^Service Info: *//' || true)"
   local gen_ts; gen_ts="$(date '+%F %T')"
 
   # drop a timeline note for this report run, so the Timeline section below shows a clear
@@ -552,8 +610,21 @@ make_report() {
     echo "# $name - report draft"
     echo
     echo "- **Target:** ${ip:-unknown}"
+    echo "- **Attacker (this machine):** ${lhost:-unknown}"
     echo "- **Generated:** $gen_ts"
+    echo "- **Open TCP ports:** ${ports:-none found}"
+    if [[ -n "$uports" ]]; then echo "- **Open UDP ports:** $uports"; fi
+    if [[ -n "$osinfo" ]]; then echo "- **Service info (nmap):** $osinfo"; fi
+    echo "- **local.txt:** $(proof_status "$dir" local)"
+    echo "- **proof.txt:** $(proof_status "$dir" proof)"
     echo
+    out="$(ports_table "$dir")"                               # filled in from the nmap scans, if there are any
+    if [[ -n "$out" ]]; then
+      echo "## Open ports (from nmap)"
+      echo
+      printf '%s\n' "$out"
+      echo
+    fi
     echo "## Notes"
     echo
     sed '1{/^# /d}' "$dir/notes/notes.md"
@@ -803,6 +874,7 @@ shopt -s histappend
 _BOXENV_SEEN=""
 _boxsync() {
   local m
+  LHOST="$(_lhost)"; export LHOST                           # our own VPN address; follows a VPN reconnect
   [ -r "$BOX_DIR/box.env" ] || return 0
   m="$(date -r "$BOX_DIR/box.env" '+%s.%N' 2>/dev/null || true)"
   [ "$m" != "$_BOXENV_SEEN" ] || return 0
@@ -868,6 +940,7 @@ pad() {                                                                         
 boxinfo() {                                                                                  # status overview
   echo "Box:    $BOX"
   echo "Target: ${IP:-<unset>}"
+  echo "Local:  ${LHOST:-<no tun0/tap0>}"
   echo "Dir:    $BOX_DIR"
   [ -n "${PORTS:-}" ] && echo "Ports:  $PORTS"
   [ -n "${UDP_PORTS:-}" ] && echo "UDP:    $UDP_PORTS"
@@ -971,8 +1044,13 @@ shot() {                                                                        
 }
 
 # --- file transfer
-_lhost() {                                                                     # our VPN address (tun0), for the client hints; "" if there is none
-  ip -4 -o addr show dev tun0 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }'
+_lhost() {                                                                     # our VPN address (tun0, else tap0), for $LHOST and the client hints; "" if there is none
+  local i a
+  for i in tun0 tap0; do
+    a="$(ip -4 -o addr show dev "$i" 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }')"
+    if [ -n "$a" ]; then printf '%s\n' "$a"; return 0; fi
+  done
+  return 0
 }
 # _serve_hints <mode> <host> <port> <share> <user>: copy-paste client commands for the target
 _serve_hints() {
@@ -1143,6 +1221,38 @@ addcred() {                                                                     
   printf '%s  %s  (%s)\n' "$(date '+%F %T')" "$c" "${*:-no source noted}" >> "$f"
   note "cred recorded for ${c%%:*} (${*:-no source noted})"      # timeline gets the username only, never the password
 }
+markproof() {                                                                                # markproof local|proof [value]   (-u to untick)
+  local undo=0 which val mark=x f="$BOX_DIR/notes/notes.md" t
+  if [ "${1:-}" = "-u" ]; then undo=1; mark=" "; shift; fi
+  case "${1:-}" in
+    local|user) which=local ;;
+    proof|root) which=proof ;;
+    *) echo "usage: markproof local|proof [value]    (markproof -u local|proof to untick)"; return 1 ;;
+  esac
+  shift
+  val="$*"; val="${val//$'\n'/ }"
+  [ -f "$f" ] || { echo "markproof: no notes/notes.md"; return 1; }
+  grep -qE "^- \[.\] $which\.txt:" "$f" || { echo "markproof: no '- [ ] $which.txt:' line in notes/notes.md (template changed?)"; return 1; }
+  t="$(mktemp "$BOX_DIR/notes/.notes.XXXXXX")" || return 1
+  # with a value, it replaces whatever followed the colon; without one, what was there is kept
+  MK_VAL="$val" awk -v w="$which" -v m="$mark" '
+    $0 ~ ("^- \\[.\\] " w "\\.txt:") {
+      v = ENVIRON["MK_VAL"]
+      rest = (v != "") ? " " v : substr($0, index($0, ":") + 1)
+      print "- [" m "] " w ".txt:" rest
+      next
+    }
+    { print }' "$f" > "$t" || { rm -f "$t"; return 1; }
+  chmod --reference="$f" "$t" 2>/dev/null || chmod 644 "$t"
+  mv -f "$t" "$f"
+  if [ "$undo" -eq 1 ]; then
+    note "proof: $which.txt unmarked"
+    echo "$which.txt unticked"
+  else
+    note "proof: $which.txt marked done${val:+ ($val)}"
+    echo "$which.txt ticked${val:+ ($val)}"
+  fi
+}
 proofcmd() {                                                                                 # prints proof one-liners to paste on the target
   cat <<'P'
 Linux:
@@ -1162,9 +1272,11 @@ cleanlog() { "$MKBOX_BIN" -c "$BOX_DIR"; }                                      
 report()   { "$MKBOX_BIN" -r "$@" "$BOX_DIR"; }                                              # report [--creds]
 
 echo "Box:    $BOX"
+LHOST="$(_lhost)"; export LHOST
 echo "Target: \$IP=${IP:-<unset>}"
+echo "Local:  \$LHOST=${LHOST:-<no tun0/tap0>}"
 echo "Dir:    $BOX_DIR"
-echo "Helpers: note pad shot boxinfo boxcd setip portscan udpscan svcscan serve addcred proofcmd cleanlog report"
+echo "Helpers: note pad shot boxinfo boxcd setip portscan udpscan svcscan serve addcred proofcmd markproof cleanlog report"
 echo "Logged on connect/exit: $MKBOX_NET_CMDS"
 EOF
 # the masking program is shared with the report (see MASK_AWK above); %q makes it safe to source
