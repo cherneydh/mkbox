@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.3.0
+
+### Added
+
+- **`addexploit <file-in-exploits/> <source-url> [what you changed]`.** Records where a public
+  exploit came from and what you modified, in `exploits/SOURCES.md`. The report shows these entries
+  at the top of **Exploits / scripts**, ahead of the plain file list (`SOURCES.md` itself is left out
+  of that list).
+- **`pivot <to-host> <via> [note]`.** Records an AD lateral-movement hop as a timeline note
+  (`pivot DC01 "psexec with bob:ntlm-hash"`). The report pulls every hop into its own **Pivot chain**
+  section, right under the open-ports table, so a multi-host chain doesn't get buried in the full
+  timeline further down.
+- **`proofshot local|proof [value]`.** `shot` + `markproof` in one step: saves the clipboard image as
+  proof evidence and ticks the Proof checklist at the same time, so the screenshot and the tick can't
+  drift apart. `user` / `root` are aliases, same as `markproof`.
+- **Proof-missing warning.** `mkbox -r` now checks the Proof checklist and prints a
+  `WARNING: not yet marked done: ...` naming whichever of `local.txt` / `proof.txt` hasn't been ticked
+  with `markproof`/`proofshot` yet. Not a hard stop - it's a nudge to catch a missing proof screenshot
+  while you still have access to the box, not after submitting.
+
+### Changed
+
+- `pivot` and `proofshot` commands are left out of the report's command log (their timeline notes
+  already say the same thing). `addexploit` is **not** left out: it's the only place the "what you
+  changed" text appears in full, alongside the `SOURCES.md` entry.
+
 ## 1.2.0
 
 ### Added
