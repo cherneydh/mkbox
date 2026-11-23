@@ -145,7 +145,7 @@ Shared between tabs:
 
 Not shared: output. Each tab's terminal output goes to that tab's own log.
 
-**Manual edits now stick (until something else writes `box.env`).** Typing `IP=10.10.10.50` by hand is no longer reverted at the next prompt, because the sync only re-sources `box.env` when its mtime changes. It's still better to use `setip`, because that also updates the notes header and the timeline - a hand-set `$IP` only changes the variable. And the next `portscan` / `udpscan` in that tab will happily save your hand-set `$IP` back into `box.env` (sharing it with other tabs), since mkbox has no way to tell a manual edit from an intentional one. For other hosts (pivoting, the AD set), use your own variable names such as `$DC` or `$T2` so they never collide with `box.env` at all.
+**Manual edits now stick (until something else writes `box.env`).** Typing `IP=10.10.10.50` by hand is no longer reverted at the next prompt, because the sync only re-sources `box.env` when its mtime changes. It's still better to use `setip`, because that also updates the notes header and the timeline - a hand-set `$IP` only changes the variable. And the next `portscan` / `udpscan` in that tab will happily save your hand-set `$IP` back into `box.env` (sharing it with other tabs), since mkbox has no way to tell a manual edit from an intentional one. For other hosts (pivoting, the AD set), use your own variable names such as `$DC` or `$T2` so they never collide with `box.env` at all - and run `pivot <to-host> <via> [note]` each time you move to a new one (`pivot DC01 "psexec with bob:ntlm-hash"`), so the chain shows up as its own section at the top of the report instead of only as scattered notes in the timeline.
 
 If a session ends abnormally (terminal closed, SSH dropped), cleanup doesn't run. Run `mkbox -c <boxname>` to rebuild the cleaned log.
 
@@ -157,6 +157,7 @@ Available inside the box shell:
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `note "text"`               | Appends a timestamped line to `notes/timeline.md`                                                                 |
 | `shot "note"`               | Saves the image on your clipboard to `screenshots/` with a timestamp and note, and logs it to the timeline        |
+| `proofshot local\|proof [value]` | `shot` + `markproof` in one step: saves the clipboard image as proof and ticks the checklist, so you can't take the shot and forget to tick it. `user` / `root` are aliases, same as `markproof` |
 | `boxinfo`                   | Shows target, ports, file counts, proof checklist, recent timeline                                                |
 | `boxcd [subdir]`            | `cd` to the box directory or a subfolder (`boxcd nmap`)                                                           |
 | `setip <ip>`                | Changes the target IP (after a machine revert); validates it, updates `box.env` and the notes header              |
@@ -164,9 +165,11 @@ Available inside the box shell:
 | `udpscan [N]`               | Runs `nmap -sU -sV --top-ports N --open` (default 20) into `nmap/udp.*`, sets `$UDP_PORTS`                        |
 | `svcscan [ports]`           | Runs `nmap -sC -sV -p <ports>` into `nmap/services.*` (defaults to `$PORTS`; accepts numbers and ranges)          |
 | `serve [--smb\|--webdav] [--bind ip] [port]` | Serves `transfer/`: `python3 -m http.server` by default, `--smb` for an SMB share, `--webdav` for WebDAV - see [Serving files](#serving-files) |
+| `pivot <to-host> <via> [note]` | Records a lateral-movement hop in the timeline (`pivot DC01 "psexec with bob:ntlm-hash"`); the report pulls every hop into a standalone **Pivot chain** section - see [Reporting](#reporting) |
 | `pad [-g] [edit\|add\|cmd\|show\|grep\|path]` | Scratchpad for notes and commands that don't belong in the report - see [Scratchpad](#scratchpad) |
 | `ssh`, `ftp`, `sftp`, `smbclient`, `rdesktop`, `xfreerdp`, `nc`, `telnet`, `mysql`, ... | Logged automatically on connect/disconnect - see [Logging connections](#logging-connections-ssh-ftp-rdp-) |
 | `addcred user:pass [where]` | Appends to `creds/creds.txt`; the timeline records only the username                                              |
+| `addexploit <file> <source-url> [what changed]` | Records where a file in `exploits/` came from and what you modified, in `exploits/SOURCES.md`; the report shows this ahead of the plain file list - see [Reporting](#reporting) |
 | `proofcmd`                  | Prints one-liners to paste on a target to show proof file, user, hostname, and IP                                 |
 | `markproof local\|proof [value]` | Ticks `local.txt` / `proof.txt` in the Proof checklist of `notes/notes.md`, stores the optional value on that line, adds a timeline note. `user` / `root` are aliases; `markproof -u local` unticks (value kept) |
 | `cleanlog`                  | Rebuilds the cleaned session log mid-session                                                                      |
@@ -226,6 +229,14 @@ This saves the clipboard image as `screenshots/<YYYYmmdd-HHMMSS>-<note-slug>.png
 - It needs `xclip` on X11 (`sudo apt install xclip`) or `wl-clipboard` on Wayland. The clipboard must contain a PNG; anything else is rejected without saving.
 - Over plain SSH there is no desktop clipboard, so `shot` won't work there.
 
+**`proofshot local|proof [value]`** is `shot` + `markproof` in one step, for the two screenshots that matter most: once you've got `local.txt`/`proof.txt` on screen (see `proofcmd` for a one-liner that prints it alongside `whoami`/`hostname`/the IP), copy it and run:
+
+```
+proofshot proof 0a1b2c3d4e5f
+```
+
+That saves the screenshot, labels it, and ticks the Proof checklist in `notes/notes.md` with the flag value, all at once - the same thing `shot "..."` followed by `markproof proof 0a1b2c3d4e5f` would do, just without the chance of doing one and forgetting the other. `markproof -u` still works afterward if you need to untick it.
+
 ### Recon wrappers
 
 `portscan`, `udpscan` and `svcscan` are thin wrappers that run `nmap` with the fixed flags shown above, so you can read exactly what they do in the script. They use `sudo` unless you are already root.
@@ -281,10 +292,21 @@ Cleanup behaves like a simple terminal: carriage returns and backspaces move a c
 
 Where the information exists, the top of the report is filled in without you writing anything:
 
-- **Summary lines:** target, your own address (`$LHOST`, or `unknown` when there is no `tun0`/`tap0`), open TCP and UDP ports (from `box.env`), the `Service Info:` line from `nmap/services.nmap` (usually the OS), and whether `local.txt` and `proof.txt` are captured, with the value you gave `markproof`. Run `markproof` before `mkbox -r`; the lines read from the checklist in `notes/notes.md`.
+- **Summary lines:** target, your own address (`$LHOST`, or `unknown` when there is no `tun0`/`tap0`), open TCP and UDP ports (from `box.env`), the `Service Info:` line from `nmap/services.nmap` (usually the OS), and whether `local.txt` and `proof.txt` are captured, with the value you gave `markproof`. Run `markproof` (or `proofshot`, below) before `mkbox -r`; the lines read from the checklist in `notes/notes.md`.
 - **Open ports (from nmap):** a table of port, protocol, service and version built from the newest scans: `nmap/services.gnmap` (or `nmap/allports.gnmap` if there is no service scan yet) plus `nmap/udp.gnmap`. Only ports nmap reports as `open` are listed. Older, time-stamped scan files are not used for the table (they are still in the **Nmap results** section).
+- **Pivot chain:** every `pivot <to-host> <via> [note]` you ran, in order, as its own section right under the ports table - a one-glance view of how an AD set's hosts chain together, since the full timeline further down can bury them among everything else. Left out entirely if you never ran `pivot`.
 
 Nothing is guessed: a line or table with no data behind it is simply left out or reads `not recorded yet` / `none found`. Your own **Notes** section is copied as-is.
+
+### Exploit provenance
+
+OSCP reports expect you to say where a public exploit came from and what you changed to make it work. `addexploit <file-in-exploits/> <source-url> [what you changed]` records that in `exploits/SOURCES.md`:
+
+```
+addexploit cve-2021-9999.py https://www.exploit-db.com/exploits/9999 "retargeted offsets for Ubuntu 22.04, fixed the LPORT substitution"
+```
+
+`mkbox -r` shows `SOURCES.md`'s entries at the top of the **Exploits / scripts** section, ahead of the plain file list (`SOURCES.md` itself is left out of that list, since its content is already shown above it). If you never run `addexploit`, the section is unchanged from before: just the files in `exploits/`, oldest first.
 
 ### The chronological log
 
@@ -310,8 +332,8 @@ Transcripts have no per-command timestamps (the terminal log has no timing); the
 
 What it leaves out or changes:
 
-- Trivial commands are skipped: `ls`, `ll`, `la`, `cd`, `pwd`, `clear`, `history`, `exit`, `logout`, and the helpers `note`, `shot`, `boxinfo`, `boxcd`, `cleanlog`, `proofcmd`, `markproof`, `report`.
-- `addcred user:pass ...` appears as `addcred user:***`, so the password never reaches the report.
+- Trivial commands are skipped: `ls`, `ll`, `la`, `cd`, `pwd`, `clear`, `history`, `exit`, `logout`, and the helpers `note`, `shot`, `proofshot`, `pivot`, `boxinfo`, `boxcd`, `cleanlog`, `proofcmd`, `markproof`, `report` - each of these already has its own note, screenshot caption or report section that says the same thing, so the raw command would just be a duplicate.
+- `addcred user:pass ...` appears as `addcred user:***`, so the password never reaches the report. `addexploit` is **not** skipped: its command line is the only place the "what you changed" text is shown in full, so it stays in the command log alongside the `SOURCES.md` entry in **Exploits / scripts**.
 - A password passed to a wrapped tool (`sshpass -p`, `mysql -pPASS`, `xfreerdp /p:`, `smbclient -U user%pass`, a `user:pass@host` URL, ...) is masked the same way as in the live timeline note - see [Logging connections](#logging-connections-ssh-ftp-rdp-) for the per-tool rules and what they don't catch.
 - Commands you start with a space aren't in your history, so they aren't in the log either (they are still in the session log).
 
@@ -322,6 +344,8 @@ If there's no history yet, the section falls back to the raw `timeline.md`. The 
 By default credentials are **not** inlined and `loot/` contents are never bundled (filenames only). Pass `--creds` to include `creds/`.
 
 That only covers those folders. Notes, exploits and the session log are bundled as you typed them, and other passwords you typed into commands not covered by the masking above (a `hydra` line, say, or a tool-specific password flag the [connection wrappers](#logging-connections-ssh-ftp-rdp-) don't recognize) appear in the chronological log. When you run without `--creds`, `mkbox -r` checks every password in `creds/creds.txt` against the files going into the bundle and prints a `WARNING` naming where it found one. The `addcred user:pass` line you typed is always in the session log (that's what the log is for, and `mkbox -r` says so in its output), so lines containing `addcred ` don't trigger the warning: if you see one, the password also turned up somewhere else, such as a note, a command or a pasted file. It can't catch passwords you never recorded with `addcred`.
+
+`mkbox -r` also checks the Proof checklist and prints a `WARNING: not yet marked done: ...` naming whichever of `local.txt` / `proof.txt` `markproof` (or `proofshot`) hasn't ticked yet. It's just a reminder at report time, not a hard stop - run `mkbox -r` again once you've run `markproof`/`proofshot` and the warning clears. The point is to catch a missing proof screenshot while you still have access to the box, not after submitting.
 
 The draft is a starting point: you still write the actual report.
 
