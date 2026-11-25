@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-VERSION="1.3.0"
+VERSION="1.4.1"
 
 # Written for bash 4.4+ (empty arrays under `set -u`, associative arrays); developed on 5.2.
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
@@ -47,21 +47,24 @@ env_get() {
   ( . "$1/box.env" 2>/dev/null; printf '%s' "${!2:-}" ) || true
 }
 
-# write_env <box_dir> <ip> <ports> <udp_ports>: rewrite box.env atomically (temp file + rename),
-# so a tab that re-reads it at that moment never sees a half-written file
+# write_env <box_dir> <ip> <ports> <udp_ports> [ad_set 0|1]: rewrite box.env atomically (temp file +
+# rename), so a tab that re-reads it at that moment never sees a half-written file. ad_set defaults
+# to whatever is already in box.env (so callers that don't know about it, like the only call site
+# below, never accidentally clear it).
 write_env() {
-  local t
+  local t ad="${5:-$(env_get "$1" AD_SET)}"
   t="$(mktemp "$1/.box.env.XXXXXX")"
-  printf 'export IP=%q\nexport PORTS=%q\nexport UDP_PORTS=%q\n' "$2" "$3" "$4" > "$t"
+  printf 'export IP=%q\nexport PORTS=%q\nexport UDP_PORTS=%q\nexport AD_SET=%q\n' "$2" "$3" "$4" "${ad:-0}" > "$t"
   chmod 644 "$t"
   mv -f "$t" "$1/box.env"
 }
 
 usage() {
   cat >&2 <<'U'
-Usage: mkbox [-n|--no-shell] <boxname|path> [target-ip]
+Usage: mkbox [-n|--no-shell] <boxname|path> [target-ip] [--ad]
        mkbox -c|--clean  <boxname|path>
        mkbox -r|--report [--creds] <boxname|path>
+       mkbox -a|--assemble <outfile.md> [--odt[=template.odt]] [--creds] <box1> [box2 ...]
        mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PAT|path]
        mkbox -l|--list
        mkbox -V|--version
@@ -350,7 +353,7 @@ chrono_log() {
     awk -v tools="$MKBOX_NET_CMDS" "$MASK_AWK"'
       function flush() {
         if (cmd == "") return
-        if (cmd ~ /^[ \t]*(ls|ll|la|cd|pwd|clear|history|exit|logout|boxinfo|boxcd|note|shot|proofshot|pivot|cleanlog|proofcmd|markproof|report)([ \t]|$)/) { cmd = ""; return }
+        if (cmd ~ /^[ \t]*(ls|ll|la|cd|pwd|clear|history|exit|logout|boxinfo|boxcd|note|shot|proofshot|pivot|addvuln|setad|cleanlog|proofcmd|markproof|report)([ \t]|$)/) { cmd = ""; return }
         if (match(cmd, /^addcred +[^: ]+:/)) cmd = substr(cmd, 1, RLENGTH) "***"
         cmd = mask_cmd(cmd)
         printf "%s\tC\t%s\n", ep, cmd
@@ -612,6 +615,286 @@ pivot_chain() {
   printf '%s\n' "- ${out//$'\n'/$'\n'- }"
 }
 
+# findings_section <box_dir>: every addvuln entry in vulns/*.md, grouped by phase (initial access,
+# privilege escalation, post-exploitation, then anything else) in that fixed order, each rendered as
+# its own heading with Severity / Vulnerability Explanation / Vulnerability Fix - the same four
+# fields the official OSCP report template asks for per finding. Entries within a phase keep
+# creation order (the NN- filename prefix addvuln gives them). Prints nothing if there are none.
+#
+# Each finding after the first is preceded by a "---" rule. In a standalone box's own report this
+# heading is a real "###" and already gets its own spacing; but under `mkbox -a`, a box this deep
+# gets demoted past the template's heading-depth cap (see demote_headings) and rendered as a bold
+# paragraph instead of a styled heading, which otherwise leaves two or more findings in the same
+# phase running into each other with no visual break.
+findings_section() {
+  local dir="$1" phase label f title sev body first=1
+  for phase in initial privesc post other; do
+    case "$phase" in
+      initial) label="Initial Access" ;;
+      privesc) label="Privilege Escalation" ;;
+      post)    label="Post Exploitation" ;;
+      *)       label="Other Findings" ;;
+    esac
+    local -a files=()
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      local p; p="$(sed -n '1s/^Phase: //p' "$f")"
+      if [[ "$phase" == other ]]; then
+        case "$p" in initial|privesc|post) continue ;; esac
+      else
+        [[ "$p" == "$phase" ]] || continue
+      fi
+      files+=("$f")
+    done < <(find "$dir/vulns" -maxdepth 1 -name '*.md' 2>/dev/null | sort)
+    [[ ${#files[@]} -gt 0 ]] || continue
+    for f in "${files[@]}"; do
+      title="$(sed -n '2s/^Title: //p' "$f")"
+      sev="$(sed -n '3s/^Severity: //p' "$f")"
+      sev="$(tr '[:lower:]' '[:upper:]' <<<"${sev:0:1}")${sev:1}"
+      body="$(tail -n +5 "$f")"
+      [[ "$first" -eq 1 ]] || printf -- '---\n\n'
+      first=0
+      printf '### %s - %s\n\n**Severity:** %s\n\n%s\n\n' "$label" "${title:-untitled}" "${sev:-Unknown}" "$body"
+    done
+  done
+}
+
+# demote_headings <add_n> <drop_first_h1 0|1> <max_level>: reads markdown on stdin and adds <add_n>
+# '#'s to every heading. A heading whose new level would exceed <max_level> is rewritten as a bold
+# paragraph instead (hashes dropped, text wrapped in **...**): most ODT templates, including
+# OffSec's own, only define Heading styles a few levels deep (OffSec's goes to Heading 3, matching
+# its own x.y.z numbering), and a heading pandoc can't map to a defined style renders as a plain
+# paragraph with the literal "####" left in the text - visibly broken. Lines inside ``` fences are
+# left alone no matter what they start with, so a `# ` comment nmap puts at the top of its own
+# output (nmap -oA always starts a .nmap file with one) is never mistaken for a markdown heading.
+# An empty "-" placeholder bullet (notes.md's Foothold/Privilege Escalation/etc. sections start out
+# as exactly that) is rewritten too: left alone, pandoc's markdown reader doesn't treat the heading
+# right after it as interrupting the list, so it comes out as literal, unparsed "### " text folded
+# into that list instead of a real heading - rewriting it as a line of its own both avoids that and
+# usefully flags, in the assembled draft, a section you never filled in. If <drop_first_h1> is 1, a
+# lone top "# ..." line (one box's own report title) is dropped entirely, since the caller gives
+# that box its own heading already.
+demote_headings() {
+  awk -v n="$1" -v drop="$2" -v maxlvl="$3" '
+    BEGIN { pre = ""; for (i = 0; i < n; i++) pre = pre "#"; infence = 0 }
+    NR == 1 && drop == 1 && $0 ~ /^# / { next }
+    /^```/ { infence = !infence; print; next }
+    infence { print; next }
+    /^-[ \t]*$/ { print "_(nothing recorded)_"; next }
+    /^#+ / {
+      match($0, /^#+/)
+      lvl = RLENGTH + n
+      rest = substr($0, RLENGTH + 2)
+      if (lvl > maxlvl) { print "**" rest "**" }
+      else { print substr($0, 1, RLENGTH) pre " " rest }
+      next
+    }
+    { print }
+  '
+}
+
+# fix_odt_heading_styles <odt_file> <template_file>: pandoc's ODT writer always references heading
+# paragraph styles under the name "Heading 1", "Heading 2", etc. (encoded as "Heading_20_N"). Some
+# ODT templates - including OffSec's own exam report template - instead name theirs "Heading1",
+# "Heading2" with no separator at all (a leftover of whatever tool produced the .odt). When the
+# names don't match, --reference-doc still copies the template's style *definitions* into the
+# output, but nothing in the document actually points at them, so every heading silently renders as
+# plain body text with no visual distinction. This patches the generated file's content.xml in
+# place, after the fact, to reference whichever name variant the template itself actually uses, for
+# each outline level pandoc emitted. A no-op (silent success) if python3 is missing or the template
+# uses pandoc's own naming already - either way, nothing about the file's content is at risk.
+fix_odt_heading_styles() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 -I - "$1" "$2" <<'PYEOF'
+import sys, zipfile, os
+
+odt_path, tpl_path = sys.argv[1], sys.argv[2]
+
+def heading_style_names(path):
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        styles = z.read('styles.xml').decode('utf-8', 'replace') if 'styles.xml' in names else ''
+        content = z.read('content.xml').decode('utf-8', 'replace') if 'content.xml' in names else ''
+    found = {}
+    for n in range(1, 7):
+        for pat in (f'Heading_20_{n}', f'Heading{n}'):
+            if f'style:name="{pat}"' in styles or f'style:name="{pat}"' in content:
+                found[n] = pat
+                break
+    return found
+
+tpl_names = heading_style_names(tpl_path)
+needs_fix = {n: real for n, real in tpl_names.items() if real != f'Heading_20_{n}'}
+if not needs_fix:
+    sys.exit(0)
+
+tmp = odt_path + '.tmp'
+with zipfile.ZipFile(odt_path) as zin, zipfile.ZipFile(tmp, 'w') as zout:
+    if 'mimetype' in zin.namelist():
+        zout.writestr('mimetype', zin.read('mimetype'), compress_type=zipfile.ZIP_STORED)
+    for item in zin.infolist():
+        if item.filename == 'mimetype':
+            continue
+        data = zin.read(item.filename)
+        if item.filename == 'content.xml':
+            text = data.decode('utf-8')
+            for n, real in needs_fix.items():
+                text = text.replace(f'"Heading_20_{n}"', f'"{real}"')
+            data = text.encode('utf-8')
+        zout.writestr(item, data, compress_type=zipfile.ZIP_DEFLATED)
+os.replace(tmp, odt_path)
+PYEOF
+}
+
+# _assemble_collect_warnings <box_dir> <name> <with_creds> <array_name>: runs make_report for one
+# box (same as assemble_main always did) but also captures its stdout instead of discarding it
+# outright, so any "WARNING: ..." line it prints (proof not marked done, an unfilled addvuln entry,
+# a leaked password) isn't silently lost just because this box is one of several being collated
+# instead of reported on its own. Matching lines are appended to the named array, prefixed with the
+# box name, for assemble_main to print once after the draft is written.
+_assemble_collect_warnings() {
+  local dir="$1" name="$2" with_creds="$3"
+  local -n _arr="$4"
+  local _out line
+  _out="$(make_report "$dir" "$name" "$with_creds" 2>&1)"
+  while IFS= read -r line; do
+    [[ "$line" == WARNING:* ]] || continue
+    _arr+=("$name: $line")
+  done <<<"$_out"
+}
+
+# assemble_main <with_creds 0|1> <odt 0|1> <odt_template|""> <outfile.md> <box...>: regenerates each
+# listed box's own report, then concatenates them into one document shaped like the official OSCP
+# report template - standalone boxes under "Independent Challenges", boxes marked `setad on` (or
+# created with `--ad`) under "Active Directory Set" with one combined ports table of their own,
+# ahead of the official template's two sections. Each box's own report is demoted two heading
+# levels (its own "## Open ports" etc. become "####") so it nests under the "### Target #N - <ip>"
+# / "### <boxname> - <ip>" heading assemble_main gives it, and its own top "# <name> - report draft"
+# line is dropped, since that heading now exists one level up instead.
+#
+# High-Level Summary / Recommendations / Methodology are left as TODOs: mkbox only knows what
+# happened on each box, not what to say about it, so - same as everywhere else in this report - it
+# doesn't guess. The current OSCP Exam Guide doesn't ask for Maintaining Access / House Cleaning
+# sections (no persistence or cleanup expected on exam hosts), so this doesn't generate stubs for
+# those either; check the guide yourself before adding anything like that.
+assemble_main() {
+  local with_creds="$1" odt="$2" odt_tpl="$3"; shift 3
+  local outfile="${1:-}"
+  if [[ -z "$outfile" ]]; then
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]] [--creds] <box1> [box2 ...]" >&2
+    return 1
+  fi
+  shift
+  if [[ $# -eq 0 ]]; then
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]] [--creds] <box1> [box2 ...]" >&2
+    return 1
+  fi
+
+  local -a standalone=() adset=()
+  local b dir name ad
+  for b in "$@"; do
+    if [[ "$b" == "." || "$b" == */* ]]; then dir="$(realpath -m -- "$b")"; else dir="$PWD/$b"; fi
+    name="$(basename -- "$dir")"
+    [[ -f "$dir/box.env" ]] || { echo "mkbox: no such box: $b (no box.env in $dir)" >&2; return 1; }
+    ad="$(env_get "$dir" AD_SET)"
+    if [[ "$ad" == "1" ]]; then adset+=("$dir|$name"); else standalone+=("$dir|$name"); fi
+  done
+
+  mkdir -p "$(dirname -- "$outfile")" 2>/dev/null || true
+  {
+    # The title is a bold line, not a heading: the official template's own 3 defined heading levels
+    # (matching its own 1 / 1.1 / 1.1.1 numbering) are needed below for Target -> per-box sections,
+    # with none to spare for a document title too.
+    echo "**OSCP Exam Report - assembled draft**"
+    echo
+    echo "_Assembled by mkbox $VERSION on $(date '+%F %T') from $(( ${#standalone[@]} + ${#adset[@]} )) box(es). This only pulls together what's in each box - fill in the TODOs below yourself._"
+    echo
+    echo "# High-Level Summary"
+    echo
+    echo "TODO: a short, non-technical paragraph on what you tested and what you found."
+    echo
+    echo "# Recommendations"
+    echo
+    echo "TODO: your overall remediation recommendations."
+    echo
+    echo "# Methodology"
+    echo
+    echo "TODO: Information Gathering / Service Enumeration / Penetration. Check the current OSCP"
+    echo "Exam Guide before writing a Maintaining Access / House Cleaning section - it doesn't ask"
+    echo "for backdoors or cleanup on exam hosts."
+    echo
+    local e d n ip i=1
+    local -a box_warnings=()
+    if [[ ${#standalone[@]} -gt 0 ]]; then
+      echo "# Independent Challenges"
+      echo
+      for e in "${standalone[@]}"; do
+        d="${e%%|*}"; n="${e#*|}"
+        _assemble_collect_warnings "$d" "$n" "$with_creds" box_warnings
+        ip="$(env_get "$d" IP)"
+        echo "## Target #$i - ${ip:-$n}"
+        echo
+        demote_headings 1 1 3 < "$d/report/$n-report.md"
+        echo
+        i=$((i + 1))
+      done
+    fi
+    if [[ ${#adset[@]} -gt 0 ]]; then
+      echo "# Active Directory Set"
+      echo
+      echo "| IP Address | Ports Open |"
+      echo "|---|---|"
+      for e in "${adset[@]}"; do
+        d="${e%%|*}"; n="${e#*|}"
+        ip="$(env_get "$d" IP)"
+        echo "| ${ip:-$n} | TCP: $(env_get "$d" PORTS || true) |"
+      done
+      echo
+      for e in "${adset[@]}"; do
+        d="${e%%|*}"; n="${e#*|}"
+        _assemble_collect_warnings "$d" "$n" "$with_creds" box_warnings
+        ip="$(env_get "$d" IP)"
+        echo "## $n - ${ip:-unknown}"
+        echo
+        demote_headings 1 1 3 < "$d/report/$n-report.md"
+        echo
+      done
+    fi
+  } > "$outfile"
+  chmod 600 "$outfile" 2>/dev/null || true
+  echo "Assembled draft: $outfile"
+  if [[ ${#box_warnings[@]} -gt 0 ]]; then
+    echo "Carried over from each box's own report - fix these before this goes in your report:"
+    printf '  %s\n' "${box_warnings[@]}"
+  fi
+
+  if [[ "$odt" -eq 1 ]]; then
+    local tpl="${odt_tpl:-${MKBOX_ODT_TEMPLATE:-}}"
+    if [[ -z "$tpl" ]]; then
+      echo "mkbox: --odt needs a template - pass --odt=/path/to/template.odt or set \$MKBOX_ODT_TEMPLATE" >&2
+      return 1
+    fi
+    [[ -f "$tpl" ]] || { echo "mkbox: --odt template not found: $tpl" >&2; return 1; }
+    if ! command -v pandoc >/dev/null 2>&1; then
+      echo "mkbox: --odt needs pandoc (sudo apt install pandoc) - the markdown draft above is still there" >&2
+      return 1
+    fi
+    local odtfile="${outfile%.md}.odt"
+    # -f markdown-task_lists: the Proof checklist's "- [x] local.txt: ..." lines are GFM task-list
+    # syntax. Pandoc's ODT writer renders those as Unicode checkbox glyphs (U+2610/U+2612); the
+    # official exam report template's font doesn't have them, so they show up as empty tofu boxes
+    # instead of a check mark. Disabling the extension makes pandoc read "[x]"/"[ ]" as plain text,
+    # which is what actually renders cleanly here.
+    if pandoc "$outfile" -f markdown-task_lists --reference-doc="$tpl" -o "$odtfile"; then
+      fix_odt_heading_styles "$odtfile" "$tpl"
+      echo "ODT draft:       $odtfile  (styled from $tpl - still check the title page, TOC and page numbers by hand)"
+    else
+      echo "mkbox: pandoc failed to build the ODT - the markdown draft is still at $outfile" >&2
+      return 1
+    fi
+  fi
+}
+
 # make_report <box_dir> <name> <with_creds 0|1>
 make_report() {
   local dir="$1" name="$2" with_creds="$3"
@@ -657,6 +940,13 @@ make_report() {
     out="$(pivot_chain "$dir")"                               # every `pivot` note, in order - AD lateral-move chain at a glance
     if [[ -n "$out" ]]; then
       echo "## Pivot chain"
+      echo
+      printf '%s\n' "$out"
+      echo
+    fi
+    out="$(findings_section "$dir")"                          # every `addvuln` entry, grouped by phase
+    if [[ -n "$out" ]]; then
+      echo "## Findings"
       echo
       printf '%s\n' "$out"
       echo
@@ -758,6 +1048,19 @@ make_report() {
   if [[ ${#unproofed[@]} -gt 0 ]]; then
     echo "WARNING: not yet marked done: ${unproofed[*]} (run: markproof local|proof <value> once you have it)"
   fi
+  local unfilled=() vf
+  if [[ -d "$dir/vulns" ]]; then
+    while IFS= read -r vf; do
+      [[ -n "$vf" ]] || continue
+      if grep -qF '(what the vulnerability is, and why this target is affected)' "$vf" \
+         || grep -qF '(the concrete remediation)' "$vf"; then
+        unfilled+=("$(basename -- "$vf")")
+      fi
+    done < <(find "$dir/vulns" -maxdepth 1 -name '*.md' 2>/dev/null | sort)
+  fi
+  if [[ ${#unfilled[@]} -gt 0 ]]; then
+    echo "WARNING: addvuln entries still have unfilled template text: ${unfilled[*]} (edit them in vulns/ before this goes in your report)"
+  fi
   if [[ "$with_creds" -eq 0 ]]; then
     echo "Left out: the creds/ and loot/ folders (use --creds to include creds/)."
     echo "That only covers those folders. Notes, exploits and the session log are bundled as typed"
@@ -777,22 +1080,31 @@ fi
 MODE=run
 NO_SHELL=0
 WITH_CREDS=0
+AD_FLAG=0
+ODT=0
+ODT_TEMPLATE=""
 POSITIONAL=()
 # Flags and the box name/IP can come in any order (mkbox lame -n, mkbox -n lame, ...); only the
 # first two non-flag args are ever used (box name, then IP), so this doesn't need getopt-style
-# option-argument handling.
+# option-argument handling. -a|--assemble is the exception: ALL positionals after it are used (an
+# outfile, then every box to pull into it), so its handling below the loop branches off before the
+# single box name/IP logic ever runs.
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -n|--no-shell) NO_SHELL=1 ;;
-    -c|--clean)    MODE=clean ;;
-    -r|--report)   MODE=report ;;
-    -l|--list)     MODE=list ;;
-    -V|--version)  echo "mkbox $VERSION"; exit 0 ;;
-    --creds)       WITH_CREDS=1 ;;
-    -h|--help)     usage 0 ;;
-    --)            shift; POSITIONAL+=("$@"); break ;;
-    -*)            echo "mkbox: unknown option $1" >&2; usage 1 ;;
-    *)             POSITIONAL+=("$1") ;;
+    -n|--no-shell)  NO_SHELL=1 ;;
+    -c|--clean)     MODE=clean ;;
+    -r|--report)    MODE=report ;;
+    -a|--assemble)  MODE=assemble ;;
+    -l|--list)      MODE=list ;;
+    -V|--version)   echo "mkbox $VERSION"; exit 0 ;;
+    --creds)        WITH_CREDS=1 ;;
+    --ad)           AD_FLAG=1 ;;
+    --odt)          ODT=1 ;;
+    --odt=*)        ODT=1; ODT_TEMPLATE="${1#--odt=}" ;;
+    -h|--help)      usage 0 ;;
+    --)             shift; POSITIONAL+=("$@"); break ;;
+    -*)             echo "mkbox: unknown option $1" >&2; usage 1 ;;
+    *)              POSITIONAL+=("$1") ;;
   esac
   shift
 done
@@ -801,6 +1113,11 @@ set -- "${POSITIONAL[@]}"
 if [[ "$MODE" == "list" ]]; then
   list_boxes
   exit 0
+fi
+
+if [[ "$MODE" == "assemble" ]]; then
+  assemble_main "$WITH_CREDS" "$ODT" "$ODT_TEMPLATE" "$@"
+  exit $?
 fi
 
 TARGET="${1:-}"
@@ -848,10 +1165,13 @@ if [[ ! -e "$BOX_DIR/.gitignore" ]]; then
   printf '*\n' > "$BOX_DIR/.gitignore"
 fi
 
-# --- shared box state (IP, open ports) lives in box.env; every tab re-reads it at each prompt ---
+# --- shared box state (IP, open ports, AD-set membership) lives in box.env; every tab re-reads it
+# at each prompt ---
 CUR_IP="$(env_get "$BOX_DIR" IP)"
-if [[ ! -f "$BOX_DIR/box.env" || ( -n "$IP" && "$IP" != "$CUR_IP" ) ]]; then
-  write_env "$BOX_DIR" "${IP:-$CUR_IP}" "$(env_get "$BOX_DIR" PORTS)" "$(env_get "$BOX_DIR" UDP_PORTS)"
+CUR_AD="$(env_get "$BOX_DIR" AD_SET)"
+[[ "$AD_FLAG" -eq 1 ]] && CUR_AD=1
+if [[ ! -f "$BOX_DIR/box.env" || ( -n "$IP" && "$IP" != "$CUR_IP" ) || "$AD_FLAG" -eq 1 ]]; then
+  write_env "$BOX_DIR" "${IP:-$CUR_IP}" "$(env_get "$BOX_DIR" PORTS)" "$(env_get "$BOX_DIR" UDP_PORTS)" "$CUR_AD"
 fi
 
 # --- notes template (only created once, never overwritten) ---
@@ -925,10 +1245,10 @@ _boxsync() {
   _BOXENV_SEEN="$m"
   return 0
 }
-_saveenv() {   # write IP / PORTS / UDP_PORTS to box.env atomically (temp file + rename)
+_saveenv() {   # write IP / PORTS / UDP_PORTS / AD_SET to box.env atomically (temp file + rename)
   local t
   t="$(mktemp "$BOX_DIR/.box.env.XXXXXX")" || return 1
-  printf 'export IP=%q\nexport PORTS=%q\nexport UDP_PORTS=%q\n' "${IP:-}" "${PORTS:-}" "${UDP_PORTS:-}" > "$t"
+  printf 'export IP=%q\nexport PORTS=%q\nexport UDP_PORTS=%q\nexport AD_SET=%q\n' "${IP:-}" "${PORTS:-}" "${UDP_PORTS:-}" "${AD_SET:-0}" > "$t"
   chmod 644 "$t"
   mv -f "$t" "$BOX_DIR/box.env"
   _BOXENV_SEEN="$(date -r "$BOX_DIR/box.env" '+%s.%N' 2>/dev/null || true)"   # we already have these values; don't re-source our own write
@@ -993,6 +1313,7 @@ boxinfo() {                                                                     
   echo "Dir:    $BOX_DIR"
   [ -n "${PORTS:-}" ] && echo "Ports:  $PORTS"
   [ -n "${UDP_PORTS:-}" ] && echo "UDP:    $UDP_PORTS"
+  [ "${AD_SET:-0}" = 1 ] && echo "AD set: yes"
   printf 'Files:  '
   for d in nmap web loot exploits screenshots; do
     printf '%s=%s ' "$d" "$(find "$BOX_DIR/$d" -type f 2>/dev/null | wc -l)"
@@ -1002,6 +1323,17 @@ boxinfo() {                                                                     
   grep -E '^- \[.\] (local|proof)\.txt' "$BOX_DIR/notes/notes.md" | sed 's/^/  /'
   echo "Recent timeline:"
   tail -n 5 "$BOX_DIR/notes/timeline.md" | sed 's/^/  /'
+}
+setad() {                                                                                    # setad on|off  -  mark/unmark this box as part of the Active Directory set
+  case "${1:-}" in
+    on|1|yes) AD_SET=1 ;;
+    off|0|no) AD_SET=0 ;;
+    *) echo "usage: setad on|off"; return 1 ;;
+  esac
+  export AD_SET
+  _saveenv
+  note "AD set membership: $([ "$AD_SET" = 1 ] && echo on || echo off)"
+  echo "AD_SET=$AD_SET"
 }
 setip() {                                                                                    # setip 10.10.10.4 (after a machine revert)
   [ -n "${1:-}" ] || { echo "usage: setip <ip>"; return 1; }
@@ -1277,6 +1609,35 @@ addexploit() {                                                                  
   printf -- '- **%s** - `%s`\n  - Source: %s\n  - Modified: %s\n' "$(date '+%F %T')" "$file" "$src" "${*:-no, used as-is}" >> "$f"
   note "exploit recorded: $file (source: $src)"
 }
+addvuln() {                                                                                  # addvuln initial|privesc|post "<title>" critical|high|medium|low
+  local phase="${1:-}" title="${2:-}" sev="${3:-}"
+  local usg='usage: addvuln initial|privesc|post "<title>" critical|high|medium|low   (opens $EDITOR for the Explanation/Fix text)'
+  case "$phase" in initial|privesc|post) ;; *) echo "$usg"; return 1 ;; esac
+  [ -n "$title" ] || { echo "$usg"; return 1; }
+  sev="$(tr '[:upper:]' '[:lower:]' <<<"$sev")"
+  case "$sev" in critical|high|medium|low) ;; *) echo "$usg"; return 1 ;; esac
+  mkdir -p "$BOX_DIR/vulns"
+  local n slug f ed
+  n=$(( $(find "$BOX_DIR/vulns" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l) + 1 ))
+  slug="$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40)"
+  f="$BOX_DIR/vulns/$(printf '%02d' "$n")-$phase-${slug:-finding}.md"
+  if [ ! -e "$f" ]; then
+    printf 'Phase: %s\nTitle: %s\nSeverity: %s\n\n**Vulnerability Explanation:** (what the vulnerability is, and why this target is affected)\n\n**Vulnerability Fix:** (the concrete remediation)\n' \
+      "$phase" "$title" "$sev" > "$f"
+  fi
+  ed="${VISUAL:-${EDITOR:-}}"
+  if [ -z "$ed" ]; then
+    for ed in nano vim vi; do command -v "$ed" >/dev/null 2>&1 && break; ed=""; done
+  fi
+  if [ -z "$ed" ]; then
+    echo "mkbox: no editor found - set \$EDITOR, or fill in $f yourself"
+  else
+    # shellcheck disable=SC2086
+    $ed "$f"
+  fi
+  note "vuln recorded: [$phase] $title ($sev)"
+  echo "finding saved: $f"
+}
 markproof() {                                                                                # markproof local|proof [value]   (-u to untick)
   local undo=0 which val mark=x f="$BOX_DIR/notes/notes.md" t
   if [ "${1:-}" = "-u" ]; then undo=1; mark=" "; shift; fi
@@ -1343,7 +1704,7 @@ LHOST="$(_lhost)"; export LHOST
 echo "Target: \$IP=${IP:-<unset>}"
 echo "Local:  \$LHOST=${LHOST:-<no tun0/tap0>}"
 echo "Dir:    $BOX_DIR"
-echo "Helpers: note pad shot proofshot boxinfo boxcd setip portscan udpscan svcscan serve pivot addcred addexploit proofcmd markproof cleanlog report"
+echo "Helpers: note pad shot proofshot boxinfo boxcd setip setad portscan udpscan svcscan serve pivot addcred addexploit addvuln proofcmd markproof cleanlog report"
 echo "Logged on connect/exit: $MKBOX_NET_CMDS"
 EOF
 # the masking program is shared with the report (see MASK_AWK above); %q makes it safe to source
