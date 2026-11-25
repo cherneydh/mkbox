@@ -284,6 +284,110 @@ check "proofshot: bad arg gives usage"    has "$T/proofshot.out" "usage: proofsh
 "$MK" -r shotbox > /dev/null 2>&1
 check "timeline: proofshot command not duplicated" bash -c "! grep -q '\\\$ proofshot local' 'shotbox/report/shotbox-report.md'"
 
+# --- addvuln ------------------------------------------------------------------------------------
+echo "addvuln"
+cat > "$T/bin/fake-editor" <<'STUB'
+#!/usr/bin/env bash
+sed -i \
+  -e 's/(what the vulnerability is, and why this target is affected)/SMB share allowed anonymous read access to a password file./' \
+  -e 's/(the concrete remediation)/Disable anonymous\/guest SMB access./' \
+  "$1"
+STUB
+chmod +x "$T/bin/fake-editor"
+EDITOR="$T/bin/fake-editor" printf '%s\n' \
+  'addvuln initial "Anonymous SMB share leads to WordPress RCE" critical' \
+  'addvuln privesc "AlwaysInstallElevated" high' \
+  'addvuln bogus "x" critical' \
+  'addvuln initial "x" bogus' \
+  'exit' | env EDITOR="$T/bin/fake-editor" "$MK" smoke > "$T/vuln.out" 2>&1
+check "addvuln: two files created"        bash -c "[ \$(find smoke/vulns -maxdepth 1 -name '*.md' | wc -l) -eq 2 ]"
+check "addvuln: numbered and phase-named" bash -c "ls smoke/vulns/01-initial-*.md smoke/vulns/02-privesc-*.md >/dev/null"
+check "addvuln: explanation written"      bash -c "grep -ql 'password file' smoke/vulns/01-*.md"
+check "addvuln: fix written"              bash -c "grep -ql 'Disable anonymous' smoke/vulns/01-*.md"
+check "addvuln: severity stored lowercase" has smoke/vulns/02-privesc-alwaysinstallelevated.md "Severity: high"
+check "addvuln: timeline note"            has smoke/notes/timeline.md "vuln recorded: [initial] Anonymous SMB share leads to WordPress RCE (critical)"
+check "addvuln: bad phase gives usage"    has "$T/vuln.out" "usage: addvuln initial|privesc|post"
+check "addvuln: bad severity gives usage" bash -c "grep -c 'usage: addvuln' '$T/vuln.out' | grep -q 2"
+"$MK" -r smoke > "$T/smoke-report.out" 2>&1
+R=smoke/report/smoke-report.md
+check "report: Findings section"            has "$R" "## Findings"
+check "report: initial access heading"       has "$R" "### Initial Access - Anonymous SMB share leads to WordPress RCE"
+check "report: privesc heading, after initial" bash -c "grep -n 'Initial Access -' '$R' | cut -d: -f1 > $T/i.n; grep -n 'Privilege Escalation -' '$R' | cut -d: -f1 > $T/p.n; [ \"\$(cat $T/i.n)\" -lt \"\$(cat $T/p.n)\" ]"
+check "report: severity shown"               has "$R" "**Severity:** Critical"
+check "timeline: addvuln command not duplicated" bash -c "! grep -q '\\\$ addvuln initial' '$R'"
+check "report: blank line before Notes (no literal #### from a missing one)" bash -c "! grep -q '####' '$R'"
+check "report: findings separated by a rule" bash -c "grep -n '^---\$' '$R' | cut -d: -f1 > $T/sep.n; grep -n 'Initial Access -' '$R' | cut -d: -f1 > $T/i2.n; grep -n 'Privilege Escalation -' '$R' | cut -d: -f1 > $T/p2.n; [ \"\$(cat $T/i2.n)\" -lt \"\$(cat $T/sep.n)\" ] && [ \"\$(cat $T/sep.n)\" -lt \"\$(cat $T/p2.n)\" ]"
+
+# an addvuln entry whose template text was never actually edited (EDITOR=true is a no-op) should be
+# caught at report time, the same way an unmarked proof checklist item is
+"$MK" -n unfilled 10.9.9.9 > /dev/null 2>&1
+printf 'addvuln initial "Left blank by mistake" high\nexit\n' | EDITOR=true "$MK" unfilled > /dev/null 2>&1
+"$MK" -r unfilled > "$T/unfilled.out" 2>&1
+check "addvuln left unfilled: caught by mkbox -r" has "$T/unfilled.out" "WARNING: addvuln entries still have unfilled template text"
+check "addvuln left unfilled: names the file"     bash -c "grep 'WARNING: addvuln' '$T/unfilled.out' | grep -q '01-initial-left-blank-by-mistake.md'"
+check "addvuln filled in: no false positive"      bash -c "! grep -q 'WARNING: addvuln entries' '$T/smoke-report.out'"
+
+# --- setad / --ad / mkbox -a assemble ------------------------------------------------------------
+echo "setad + --ad + mkbox -a"
+"$MK" -n ad-dc 10.5.5.30 --ad > /dev/null 2>&1
+"$MK" -n ad-file 10.5.5.20 > /dev/null 2>&1
+printf 'setad on\npivot ad-dc "golden ticket, krbtgt hash"\nexit\n' | "$MK" ad-file > "$T/adfile.out" 2>&1
+check "--ad at creation: boxinfo shows it"  bash -c "printf 'boxinfo\nexit\n' | '$MK' ad-dc 2>&1 | grep -q 'AD set: yes'"
+check "setad on: boxinfo shows it"          bash -c "printf 'boxinfo\nexit\n' | '$MK' ad-file 2>&1 | grep -q 'AD set: yes'"
+check "setad on: confirms to the terminal"  has "$T/adfile.out" "AD_SET=1"
+check "setad bad arg gives usage"           bash -c "printf 'setad bogus\nexit\n' | '$MK' ad-file 2>&1 | grep -q 'usage: setad on|off'"
+check "box never flagged: no AD set line"   bash -c "! (printf 'boxinfo\nexit\n' | '$MK' smoke 2>&1 | grep -q 'AD set')"
+
+"$MK" -a "$T/assembled.md" smoke ad-dc ad-file unfilled > "$T/assemble.out" 2>&1
+A="$T/assembled.md"
+check "assemble: confirms the draft path"      has "$T/assemble.out" "Assembled draft: $T/assembled.md"
+check "assemble: surfaces a box's own warning instead of swallowing it" has "$T/assemble.out" "Carried over from each box's own report"
+check "assemble: warning is prefixed with the box name"                has "$T/assemble.out" "unfilled: WARNING: addvuln entries still have unfilled template text"
+check "assemble: box with filled-in findings has no addvuln warning"   bash -c "! grep -q 'smoke: WARNING: addvuln' '$T/assemble.out'"
+check "assemble: Independent Challenges section" has "$A" "# Independent Challenges"
+check "assemble: Active Directory Set section"   has "$A" "# Active Directory Set"
+check "assemble: standalone box nested as Target" has "$A" "## Target #1 - "
+check "assemble: AD box uses its own name, not Target" has "$A" "## ad-dc - 10.5.5.30"
+check "assemble: combined AD ports table header"  has "$A" "| IP Address | Ports Open |"
+check "assemble: combined AD ports table row"     has "$A" "| 10.5.5.30 |"
+check "assemble: pivot chain carried through"      has "$A" "pivot -> ad-dc via golden ticket, krbtgt hash"
+check "assemble: findings carried through (bold, past the heading-depth cap)" has "$A" "**Initial Access - Anonymous SMB share leads to WordPress RCE**"
+check "assemble: no literal #### anywhere"         bash -c "! grep -q '^####' '$A'"
+check "assemble: box's own H1 title dropped"       bash -c "! grep -q '^# smoke - report draft' '$A'"
+check "assemble: unfilled notes section flagged"   has "$A" "_(nothing recorded)_"
+check "assemble: TODO stubs present"               has "$A" "TODO: a short, non-technical paragraph"
+check "assemble: no outfile given gives usage"     bash -c "'$MK' -a 2>&1 | grep -q 'usage: mkbox -a'"
+check "assemble: no boxes given gives usage"       bash -c "'$MK' -a '$T/x.md' 2>&1 | grep -q 'usage: mkbox -a'"
+check "assemble: unknown box errors out"           bash -c "! '$MK' -a '$T/x.md' not-a-real-box 2>/dev/null"
+
+if command -v pandoc >/dev/null 2>&1; then
+  TPL="$T/fake-template.odt"
+  REALPYTHON3="$(PATH="${PATH#*:}" command -v python3)"   # python3 itself is stubbed above; skip past it
+  "$REALPYTHON3" -I -c "
+import zipfile
+with zipfile.ZipFile('$TPL', 'w') as z:
+    z.writestr('mimetype', 'application/vnd.oasis.opendocument.text', compress_type=zipfile.ZIP_STORED)
+    z.writestr('content.xml', '<?xml version=\"1.0\"?><office:document-content xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\"><office:body><office:text/></office:body></office:document-content>')
+    z.writestr('styles.xml', '<?xml version=\"1.0\"?><office:document-styles xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:style=\"urn:oasis:names:tc:opendocument:xmlns:style:1.0\"><office:styles><style:style style:name=\"Heading1\" style:family=\"paragraph\"/><style:style style:name=\"Heading2\" style:family=\"paragraph\"/><style:style style:name=\"Heading3\" style:family=\"paragraph\"/></office:styles></office:document-styles>')
+"
+  # mkbox's own ODT post-processing shells out to python3 too; our "python3" stub above (for the
+  # serve-backend tests) would otherwise swallow that call silently. Put the real one first for
+  # these checks only, then put the stub back on top.
+  REALPY_DIR="$(dirname -- "$REALPYTHON3")"
+  PATH="$REALPY_DIR:$PATH" "$MK" -a "$T/assembled2.md" --odt="$TPL" smoke ad-dc ad-file > "$T/assemble2.out" 2>&1
+  check "assemble --odt: ODT file produced"   bash -c "[ -s '$T/assembled2.odt' ]"
+  check "assemble --odt: confirms the path"   has "$T/assemble2.out" "ODT draft:"
+  check "assemble --odt: heading style patched to template's own naming" bash -c "
+    cd '$T' && rm -rf odtcheck && mkdir odtcheck && cd odtcheck && unzip -o -q ../assembled2.odt content.xml
+    grep -q 'text:style-name=\"Heading1\"' content.xml"
+  check "assemble --odt: proof checklist is plain text, not a checkbox glyph" bash -c "
+    cd '$T/odtcheck' && grep -q '\[x\] local.txt' content.xml"
+  PATH="$REALPY_DIR:$PATH" "$MK" -a "$T/assembled3.md" --odt smoke > "$T/assemble3.out" 2>&1
+  check "assemble --odt with no template given: clear error" has "$T/assemble3.out" "needs a template"
+else
+  echo "  skip  --odt checks (pandoc not installed)"
+fi
+
 # --- re-entering vs typos -----------------------------------------------------------------------
 echo "new vs existing"
 printf 'exit\n' | "$MK" smoke > "$T/e1.out" 2>&1
