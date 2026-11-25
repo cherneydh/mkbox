@@ -1,5 +1,77 @@
 # Changelog
 
+## 1.4.1
+
+Follow-up after actually rendering a multi-box `--odt` draft against the real exam report template
+and reading it page by page, rather than just checking the markdown source - three consistency
+problems only showed up once rendered.
+
+### Fixed
+
+- **Proof checklist rendered as an empty box instead of a check mark in ODT.** `- [x] local.txt: ...`
+  is Markdown task-list syntax; pandoc's ODT writer renders it as a Unicode checkbox glyph
+  (`☒`/`☐`), and the exam report template's body font doesn't have that glyph, so every checklist
+  line showed up as a blank tofu box. `mkbox -a --odt` now tells pandoc to read task lists as plain
+  text (`-f markdown-task_lists`), so it comes through as literal `[x]` / `[ ]` instead.
+- **Multiple findings in the same phase ran together with no visual break.** Once a finding's own
+  heading is demoted past the template's depth cap and converted to a bold paragraph (see 1.4.0), two
+  findings back to back had nothing but a blank line between them, and the template's body paragraph
+  style has no visible spacing of its own - they read as one continuous block. `findings_section` now
+  puts a `---` rule between consecutive findings.
+
+### Added
+
+- **An unfilled `addvuln` entry is now caught at report time.** If the templated Explanation/Fix
+  placeholder text in a `vulns/*.md` file was never actually edited, `mkbox -r` now prints a warning
+  naming the file - the same pattern as the existing unticked-Proof-checklist warning - instead of
+  that boilerplate text silently making it into the report and the ODT.
+- **`mkbox -a` no longer throws away each box's own warnings.** Previously, `mkbox -a` ran each box's
+  `make_report` with its output fully discarded (it only wanted the report file as a side effect), so
+  an unticked Proof item, an unfilled finding, or a leaked-password warning on any individual box
+  never surfaced while assembling. Those warnings are now collected and printed once, prefixed with
+  the box name, right after `Assembled draft:` / `ODT draft:`.
+
+## 1.4.0
+
+### Added
+
+- **`addvuln initial|privesc|post <title> <critical|high|medium|low>`.** Opens a small templated
+  finding (Explanation/Fix) in `$EDITOR` and files it under `vulns/`, in place of an ad-hoc
+  `note "found this: <link>"`. `mkbox -r` collects these into a new **Findings** section, grouped and
+  ordered by phase, with title, severity, explanation and fix for each.
+- **`setad on|off`, and `--ad` at box creation.** Flags a box as part of an Active Directory set
+  (stored as `AD_SET` in `box.env`; `boxinfo` shows `AD set: yes`). Drives how `mkbox -a` (below)
+  buckets that box.
+- **`mkbox -a|--assemble <outfile.md> [--odt[=template.odt]] [--creds] <box1> [box2 ...]`.** Collates
+  several boxes' own reports into a single draft shaped like the official exam report template:
+  standalone boxes under `Independent Challenges` (each under its own `Target #N`), AD-flagged boxes
+  under `Active Directory Set` (one combined ports table, then each box under its own name), `TODO`
+  stubs for `High-Level Summary` / `Recommendations` / `Methodology`, and each box's own report
+  content nested underneath with its headings demoted and capped at the template's own depth (deeper
+  content becomes bold paragraphs instead of ever-deeper headings, so nothing renders as literal
+  `####`). An unfilled `notes.md` section is rewritten as `_(nothing recorded)_` in the assembled
+  draft only, to flag gaps at a glance. Deliberately does not add a Maintaining Access / House
+  Cleaning stub - the current OSCP Exam Guide doesn't ask for persistence or cleanup on exam hosts.
+- **`--odt` conversion for `mkbox -a`.** Converts the assembled draft to ODT via
+  `pandoc --reference-doc=<template>`, styled from the official exam report template (or any ODT you
+  point it at). Patches the generated file's heading style references to match whatever naming
+  convention the template itself actually uses (some templates, including OffSec's, name their
+  heading styles `Heading1`/`Heading2` instead of pandoc's own convention, which would otherwise leave
+  every heading unstyled). Falls back to `$MKBOX_ODT_TEMPLATE` when `--odt` is given without a path.
+  Needs `pandoc`; the style-name patch additionally needs `python3` and silently no-ops without it.
+  Copies the template's styles only, not its cover page, TOC, or other content.
+
+### Internal
+
+- `demote_headings` is now fence-aware (tracks ` ``` ` so a `#`-prefixed line inside nmap output or a
+  code block is never mistaken for a heading) and caps heading depth with a `<max_level>` argument,
+  rather than just adding a fixed number of `#`s with no ceiling - needed once `mkbox -a` nests a whole
+  report several levels deep under the template's own numbering.
+- Fixed an edge case where an empty `notes.md` placeholder bullet (`-` with nothing after it) could
+  cause pandoc's markdown reader to absorb the heading immediately after it as unparsed list content;
+  rewriting that bullet to `_(nothing recorded)_` avoids the ambiguity entirely (and is more useful in
+  an assembled draft than an empty section would be).
+
 ## 1.3.0
 
 ### Added
