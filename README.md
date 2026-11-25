@@ -16,6 +16,8 @@ A small bash utility for organizing and documenting penetration-testing practice
 - [Logging connections (ssh, ftp, rdp, ...)](#logging-connections-ssh-ftp-rdp-)
 - [Logs](#logs)
 - [Reporting](#reporting)
+- [Findings (addvuln)](#findings-addvuln)
+- [Active Directory sets and assembling the final report](#active-directory-sets-and-assembling-the-final-report)
 - [What it does and doesn't do](#what-it-does-and-doesnt-do)
 - [Caveats](#caveats)
 - [Development](#development)
@@ -57,11 +59,12 @@ mkbox -r lame                # build a report draft + evidence tarball
 ## Commands
 
 ```
-mkbox [-n|--no-shell] <boxname|path> [target-ip]
+mkbox [-n|--no-shell] <boxname|path> [target-ip] [--ad]
 mkbox -c|--clean  <boxname|path>
 mkbox -r|--report [--creds] <boxname|path>
 mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PATTERN|path]
 mkbox -l|--list
+mkbox -a|--assemble <outfile.md> [--odt[=template.odt]] [--creds] <box1> [box2 ...]
 mkbox -V|--version
 ```
 
@@ -72,11 +75,13 @@ mkbox -V|--version
 | `mkbox .`                  | Uses the current directory as the box                                            |
 | `mkbox ~/labs/pg/foo`      | Any path works; the last component is the box name                               |
 | `mkbox -n lame 10.10.10.3` | Creates the box without starting a shell                                         |
+| `mkbox dc01 10.10.10.5 --ad` | Creates the box already flagged as part of an Active Directory set (see [below](#active-directory-sets-and-assembling-the-final-report)) |
 | `mkbox -c lame`            | Rebuilds the cleaned log from the raw session logs                               |
 | `mkbox -r lame`            | Builds a report draft and evidence tarball                                       |
 | `mkbox -r --creds lame`    | Same, but includes recorded credentials                                          |
 | `mkbox -p lame`            | Opens the box's scratchpad in `$EDITOR` (see [Scratchpad](#scratchpad))          |
 | `mkbox -l`                 | Lists boxes in the current directory with target IP and proof status             |
+| `mkbox -a draft.md lame dc01 dc02` | Collates several boxes' own reports into one document draft - see [below](#active-directory-sets-and-assembling-the-final-report) |
 | `mkbox -V`                 | Prints the version                                                               |
 
 If the box doesn't exist yet, `mkbox` creates it and says so (`creating new box 'lame' in ...`, followed by a `Happy Hacking :)`); if it does, it says `re-entering 'lame'`. So a typo like `mkbox lmae` announces that it is making a new box instead of quietly doing it.
@@ -170,6 +175,8 @@ Available inside the box shell:
 | `ssh`, `ftp`, `sftp`, `smbclient`, `rdesktop`, `xfreerdp`, `nc`, `telnet`, `mysql`, ... | Logged automatically on connect/disconnect - see [Logging connections](#logging-connections-ssh-ftp-rdp-) |
 | `addcred user:pass [where]` | Appends to `creds/creds.txt`; the timeline records only the username                                              |
 | `addexploit <file> <source-url> [what changed]` | Records where a file in `exploits/` came from and what you modified, in `exploits/SOURCES.md`; the report shows this ahead of the plain file list - see [Reporting](#reporting) |
+| `addvuln initial\|privesc\|post <title> <critical\|high\|medium\|low>` | Opens a templated finding in `$EDITOR` (Explanation/Fix) and files it under `vulns/`, in place of an ad-hoc `note "found this: <link>"` - see [Findings](#findings-addvuln) |
+| `setad on\|off`              | Flags (or unflags) the current box as part of an Active Directory set, same as creating it with `--ad` - see [Active Directory sets](#active-directory-sets-and-assembling-the-final-report) |
 | `proofcmd`                  | Prints one-liners to paste on a target to show proof file, user, hostname, and IP                                 |
 | `markproof local\|proof [value]` | Ticks `local.txt` / `proof.txt` in the Proof checklist of `notes/notes.md`, stores the optional value on that line, adds a timeline note. `user` / `root` are aliases; `markproof -u local` unticks (value kept) |
 | `cleanlog`                  | Rebuilds the cleaned session log mid-session                                                                      |
@@ -349,6 +356,87 @@ That only covers those folders. Notes, exploits and the session log are bundled 
 
 The draft is a starting point: you still write the actual report.
 
+## Findings (`addvuln`)
+
+The OSCP exam report expects each finding written up as a vulnerability explanation, a fix, and a severity - not an ad-hoc `note "found this: <link to exploit>"`. `addvuln` gives you a structured way to capture that as you go, instead of reconstructing it from memory at the end:
+
+```
+addvuln initial "Anonymous SMB share leads to WordPress RCE" critical
+addvuln privesc "AlwaysInstallElevated" high
+addvuln post    "Clear-text creds in a scheduled task" medium
+```
+
+The three phases are `initial` (Initial Access), `privesc` (Privilege Escalation), and `post` (Post Exploitation) - the same breakdown the exam report template uses per target. Severity is `critical`, `high`, `medium`, or `low`.
+
+Running `addvuln` opens a small templated file in `$EDITOR` (`vi` if `$EDITOR` isn't set):
+
+```
+# Phase: initial
+# Title: Anonymous SMB share leads to WordPress RCE
+# Severity: critical
+
+## Vulnerability Explanation
+(what the vulnerability is, and why this target is affected)
+
+## Vulnerability Fix
+(the concrete remediation)
+```
+
+Fill in the two sections and save; the file is stored under `vulns/` (numbered and slugged from the title, e.g. `vulns/01-initial-anonymous-smb-share-leads-to-wordpress-rce.md`), and a one-line entry is added to the timeline (`vuln recorded: [initial] Anonymous SMB share leads to WordPress RCE (critical)`).
+
+If you exit the editor without filling in the placeholders, the file is still kept - but unlike the rest of `vulns/`, `mkbox -r` **does** check this one thing: if either placeholder (`(what the vulnerability is...)` / `(the concrete remediation)`) is still sitting there untouched, it prints a warning naming the file, the same way it warns about an unticked Proof checklist item. It's still on you to go back and write the real explanation and fix - this only catches the "forgot entirely" case, not a thin or wrong one.
+
+`mkbox -r` collects everything under `vulns/` into a **Findings** section in the report, grouped and ordered by phase (Initial Access, then Privilege Escalation, then Post Exploitation), each with its title, severity, explanation and fix, separated from the next finding by a rule so two findings in the same phase don't run together - this is what `mkbox -a` (below) pulls into each target's write-up.
+
+## Active Directory sets and assembling the final report
+
+The exam report template splits your work into two parts: standalone targets under **Independent Challenges** (each with its own Initial Access / Service Enumeration / Privilege Escalation / Post Exploitation write-up), and, for the AD set, one combined ports table followed by a per-host write-up under **Active Directory Set**. `mkbox` tracks which boxes belong to which with a single flag.
+
+**Marking a box as part of the AD set.** Either at creation:
+
+```
+mkbox dc01 10.10.10.5 --ad
+```
+
+or at any point from inside the box shell:
+
+```
+setad on     # or: setad off
+```
+
+`boxinfo` shows `AD set: yes` once it's flagged. This is stored in `box.env` (`AD_SET`), so it's per-box and persists across sessions.
+
+**Assembling the final document.** Once you've got reports' worth of material across several boxes, `mkbox -a <outfile.md> <box1> [box2 ...]` regenerates each box's own report and collates them into one draft, shaped like the real template:
+
+```
+mkbox -a draft.md lame dc01 dc02 filesrv03
+```
+
+Any `WARNING:` line a box's own `mkbox -r` would have printed (an unticked Proof item, an unfilled `addvuln` entry, a password that turns up somewhere it shouldn't) is captured instead of being thrown away, and printed once under `Assembled draft:`, prefixed with the box it came from - previously these were silently lost the moment a box was rolled into `-a` instead of reported on its own.
+
+This produces `draft.md` with:
+
+- `High-Level Summary`, `Recommendations`, and `Methodology` as `TODO` stubs - `mkbox` only knows what happened on each box, not what to say about it, so (same as everywhere else) it doesn't guess. The `Methodology` stub is a reminder to write up Information Gathering / Service Enumeration / Penetration from what you actually did; it deliberately does **not** add a Maintaining Access / House Cleaning stub, since the current OSCP Exam Guide doesn't ask for persistence or cleanup on exam hosts - check the guide yourself before adding one, in case that changes.
+- `Independent Challenges`, with every box you didn't flag as AD, each nested under its own `Target #N - <ip>` heading.
+- `Active Directory Set`, with every flagged box: first one combined ports table (IP + open TCP ports, across all of them), then each box's own write-up nested under `<boxname> - <ip>` instead of a generic `Target #N`.
+- Each box's own report content (ports, findings, notes, pivot chain, nmap output, screenshots, exploits, loot, credentials) nested underneath, with its headings demoted so they sit at the right depth under the template's own numbering, and its own top `# <name> - report draft` title line dropped (that title now exists one level up). Headings that would end up deeper than the template actually supports (level 3) are converted to **bold paragraphs** instead of ever-deeper heading syntax, so nothing silently renders as unstyled `####` text.
+- Any `notes.md` section you never filled in (an empty `-` placeholder bullet, such as an unfilled **Rabbit holes**) is rewritten as `_(nothing recorded)_` in the assembled draft - this is intentional, so a glance at the draft shows you exactly what's still unfinished, rather than hiding it as an empty section.
+
+Pass `--creds` to include `creds/creds.txt` for every box, same as `mkbox -r --creds`.
+
+**Converting to ODT.** If you want something closer to a finished document instead of raw Markdown, pass `--odt=<path-to-template.odt>` (or just `--odt` if you've already converted with that same template before - see below) and `mkbox -a` also produces `<outfile>.odt`, styled using the official exam report template's own heading styles, via `pandoc --reference-doc`:
+
+```
+mkbox -a draft.md --odt=~/OSCP-Exam-Report.odt lame dc01 dc02 filesrv03
+```
+
+This needs `pandoc` installed; if it isn't, `mkbox` says so and skips the ODT step (the Markdown draft is still produced). A few things worth knowing:
+
+- **It copies the template's styles, not its content.** The cover page, table of contents, page numbers and any boilerplate text in the official template aren't reproduced - you're still expected to either paste the generated body text into a copy of the real template, or treat the ODT as a freshly-styled document and add that front matter yourself by hand.
+- Some ODT templates (including OffSec's own) name their heading styles `Heading1`/`Heading2`/`Heading3` instead of pandoc's own `Heading 1`/`Heading 2` convention - without extra handling, `--reference-doc` would copy the style *definitions* but nothing in the generated document would actually reference them, so every heading would silently render as plain body text. `mkbox` detects this and patches the generated file to use whichever naming the template actually uses, after pandoc runs.
+- The Proof checklist (`- [x] local.txt: ...`) is Markdown task-list syntax; converted at face value it renders as a Unicode checkbox glyph, and most ODT templates' body font (including OffSec's own) doesn't have that glyph, so it shows up as an empty box instead of a check mark. `mkbox` tells pandoc to read it as plain text instead, so it comes through as `[x] local.txt: ...` - legible, if not styled as a real checkbox.
+- You can leave off the path on later runs (`--odt` with no `=path`) if you export `MKBOX_ODT_TEMPLATE=~/OSCP-Exam-Report.odt` once (your shell profile, say); `mkbox` falls back to that. With neither `--odt=<path>` nor `$MKBOX_ODT_TEMPLATE` set, it says so and skips the ODT step rather than guessing a template.
+
 ## What it does and doesn't do
 
 **It does:**
@@ -378,6 +466,8 @@ The whole tool is a single readable bash script (`mkbox`), so it is easy to audi
 - `ssh`, `ftp`, `rdesktop`, and the other commands listed in [Logging connections](#logging-connections-ssh-ftp-rdp-) are wrapped to log a start/end timeline note; this is passthrough and doesn't change how they behave - see that section for exactly what it does and doesn't catch.
 - `mkbox` expects GNU `find`, `date` and `realpath` (standard on Kali and most Linux distros).
 - The password-masking rules are written in portable awk and were tested with `mawk` (Kali's default `awk`).
+- `mkbox -a` caps nested heading depth at 3 levels to match what the official exam report template itself supports; anything a box's own report would otherwise put deeper becomes a bold paragraph instead of a numbered heading. It also rewrites an unfilled `notes.md` placeholder bullet as `_(nothing recorded)_` in the assembled draft only - your live `notes.md` and each box's own standalone `mkbox -r` report are untouched.
+- `--odt` needs `pandoc` and (for the official exam report template specifically) `python3` on `$PATH` for the heading-style patch in [Active Directory sets and assembling the final report](#active-directory-sets-and-assembling-the-final-report); without `python3` it silently skips that one patch rather than failing, so headings may render unstyled if your template uses non-standard style names. It also only copies the template's styles, not its cover page, TOC, or any other content.
 
 ## Development
 
