@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.4.2
+
+OffSec's own reporting guidance (see the OSCP Reporting Requirements article) is explicit that no
+particular tool or template is required, only a clear PDF write-up of the exam objectives - so
+`mkbox -a --odt` no longer assumes you have a copy of OffSec's own exam report template lying
+around, or depends on one at all.
+
+### Added
+
+- **A bundled, self-contained ODT template (`templates/mkbox-default.odt`).** `mkbox -a --odt` now
+  works with no `=path` and no `$MKBOX_ODT_TEMPLATE` - it falls back to this template, shipped
+  alongside the script, instead of refusing to run. Built from pandoc's own default reference
+  document (so its heading styles already match pandoc's own naming, with nothing to patch) plus:
+  decimal outline numbering wired up for heading levels 1-3 (`1`, `1.1`, `1.1.1`, matching the
+  structure `mkbox -a` already builds), a page-number field in the footer, and a paragraph style
+  (`MkboxPageBreak`) used to force a page break before the cover page and before the Table of
+  Contents. An explicit `--odt=<path>` / `$MKBOX_ODT_TEMPLATE` still work exactly as before, for
+  anyone who'd rather use OffSec's own template or a company one.
+- **A real cover page and Table of Contents**, generated from the assembled Markdown itself (title,
+  `--author "Name"` or `$MKBOX_AUTHOR`, and today's date), via pandoc YAML metadata and a native ODT
+  `<text:table-of-content>` field - not copied out of any template, so this works the same whether
+  `--odt` uses the bundled default or a custom one. The TOC's entries and page numbers still need one
+  manual step after opening the file (Tools > Update > All, or right-click > Update Index) - normal
+  for any document with a TOC field, since nothing computes final page numbers before the document is
+  actually laid out by LibreOffice/Word.
+- `fix_odt_heading_styles` (now doing more than just heading styles - see Internal) patches a
+  `MkboxPageBreak` paragraph style into *any* `--odt` template that doesn't already define one, so
+  the forced page breaks before the cover page and the Table of Contents work even with a custom
+  template that was never built with mkbox in mind.
+- **A `Tools Used` subsection under `Methodology`**, pre-filled (not a `TODO`) naming `mkbox` itself
+  by version and repo link, with a prompt to list anything else used - OSCP reporting expects any
+  non-standard tooling to be documented, and now that doesn't depend on remembering to write it in.
+- `--author="Name"` for `mkbox -a` (falls back to `$MKBOX_AUTHOR` if unset), used on the cover page.
+
+### Internal
+
+- The cover page / TOC / forced page breaks are built into a separate temporary Markdown file (YAML
+  front matter plus raw `{=opendocument}` blocks for the ODT-specific bits) that's only ever fed to
+  pandoc - `outfile.md`, the plain draft a student actually reads, stays free of that scaffolding.
+- `fix_odt_heading_styles` now does two independent, unrelated post-processing patches (heading style
+  names, and the `MkboxPageBreak` style above) instead of just the one; each is skipped on its own if
+  the thing it would fix is already present, or if `python3` is missing entirely.
+- `MKBOX_SCRIPT_DIR` is resolved once near the top of the script (via `readlink -f "$0"`) so mkbox can
+  find its own bundled `templates/` directory regardless of the working directory or symlinks, on
+  every code path - not just the box-shell path that already resolved `MKBOX_BIN` for other reasons.
+- tests/smoke.sh: 13 new checks covering the bundled default template, the cover page/TOC/page-break
+  scaffolding, the `MkboxPageBreak` patch on a custom template, and the `Tools Used` section (189/189
+  passing).
+
 ## 1.4.1
 
 Follow-up after actually rendering a multi-box `--odt` draft against the real exam report template

@@ -382,8 +382,35 @@ with zipfile.ZipFile('$TPL', 'w') as z:
     grep -q 'text:style-name=\"Heading1\"' content.xml"
   check "assemble --odt: proof checklist is plain text, not a checkbox glyph" bash -c "
     cd '$T/odtcheck' && grep -q '\[x\] local.txt' content.xml"
-  PATH="$REALPY_DIR:$PATH" "$MK" -a "$T/assembled3.md" --odt smoke > "$T/assemble3.out" 2>&1
-  check "assemble --odt with no template given: clear error" has "$T/assemble3.out" "needs a template"
+  check "assemble --odt: a custom template without MkboxPageBreak still gets one patched in" bash -c "
+    cd '$T' && rm -rf odtcheck2 && mkdir odtcheck2 && cd odtcheck2 && unzip -o -q ../assembled2.odt styles.xml
+    grep -q 'style:name=\"MkboxPageBreak\"' styles.xml"
+  check "assemble --odt: outfile.md itself has no YAML/raw-ODT cover-page clutter" bash -c "
+    ! grep -q 'opendocument' '$T/assembled2.md'"
+
+  # with no --odt=path and no \$MKBOX_ODT_TEMPLATE, mkbox now falls back to its own bundled
+  # templates/mkbox-default.odt instead of erroring out - this is the main point of this round
+  PATH="$REALPY_DIR:$PATH" "$MK" -a "$T/assembled3.md" --odt --author="Jane Q. Tester" smoke > "$T/assemble3.out" 2>&1
+  check "assemble --odt, no template: uses the bundled default instead of erroring" bash -c "[ -s '$T/assembled3.odt' ]"
+  check "assemble --odt, no template: says so"                                     has "$T/assemble3.out" "bundled template"
+  rm -rf "$T/odtcheck3" && mkdir "$T/odtcheck3" && (cd "$T/odtcheck3" && unzip -o -q ../assembled3.odt)
+  check "assemble --odt (default template): cover page has the author"    has "$T/odtcheck3/content.xml" "Jane Q. Tester"
+  check "assemble --odt (default template): cover page has today's date" has "$T/odtcheck3/content.xml" "$(date '+%Y-%m-%d')"
+  check "assemble --odt (default template): a real TOC field is present" has "$T/odtcheck3/content.xml" "text:table-of-content"
+  check "assemble --odt (default template): forced page breaks present" bash -c "grep -c 'MkboxPageBreak' '$T/odtcheck3/content.xml' | grep -qv '^0$'"
+  check "assemble --odt (default template): decimal outline numbering"  bash -c "
+    grep -A2 'text:outline-level-style text:level=\"1\"' '$T/odtcheck3/styles.xml' | grep -q 'style:num-format=\"1\"'"
+  MKBOX_VER="$("$MK" -V | awk '{print $2}')"
+  check "assemble: Tools Used section present"           has "$T/assembled3.md" "## Tools Used"
+  check "assemble: Tools Used section names mkbox itself" has "$T/assembled3.md" "\`mkbox\` v$MKBOX_VER"
+  check "assemble: Tools Used links the repo"             has "$T/assembled3.md" "github.com/cherneydh/mkbox"
+
+  # a template that already carries its own MkboxPageBreak (mkbox's own bundled one) shouldn't be
+  # rewritten by fix_odt_heading_styles just to re-add a style that's already there
+  DEFAULT_TPL="$(cd "$(dirname -- "$MK")" && pwd)/templates/mkbox-default.odt"
+  if [ -f "$DEFAULT_TPL" ]; then
+    check "bundled template ships inside the repo" bash -c "[ -s '$DEFAULT_TPL' ]"
+  fi
 else
   echo "  skip  --odt checks (pandoc not installed)"
 fi

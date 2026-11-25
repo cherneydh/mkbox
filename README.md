@@ -64,7 +64,7 @@ mkbox -c|--clean  <boxname|path>
 mkbox -r|--report [--creds] <boxname|path>
 mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PATTERN|path]
 mkbox -l|--list
-mkbox -a|--assemble <outfile.md> [--odt[=template.odt]] [--creds] <box1> [box2 ...]
+mkbox -a|--assemble <outfile.md> [--odt[=template.odt]] [--author="Name"] [--creds] <box1> [box2 ...]
 mkbox -V|--version
 ```
 
@@ -417,6 +417,7 @@ Any `WARNING:` line a box's own `mkbox -r` would have printed (an unticked Proof
 This produces `draft.md` with:
 
 - `High-Level Summary`, `Recommendations`, and `Methodology` as `TODO` stubs - `mkbox` only knows what happened on each box, not what to say about it, so (same as everywhere else) it doesn't guess. The `Methodology` stub is a reminder to write up Information Gathering / Service Enumeration / Penetration from what you actually did; it deliberately does **not** add a Maintaining Access / House Cleaning stub, since the current OSCP Exam Guide doesn't ask for persistence or cleanup on exam hosts - check the guide yourself before adding one, in case that changes.
+- A **Tools Used** section under `Methodology`, already filled in (not a `TODO`) naming `mkbox` itself and its version/repo link, alongside a reminder to list anything else you used - OSCP reporting expects any extra tooling beyond the standard set to be documented, and this one you don't have to remember to add yourself.
 - `Independent Challenges`, with every box you didn't flag as AD, each nested under its own `Target #N - <ip>` heading.
 - `Active Directory Set`, with every flagged box: first one combined ports table (IP + open TCP ports, across all of them), then each box's own write-up nested under `<boxname> - <ip>` instead of a generic `Target #N`.
 - Each box's own report content (ports, findings, notes, pivot chain, nmap output, screenshots, exploits, loot, credentials) nested underneath, with its headings demoted so they sit at the right depth under the template's own numbering, and its own top `# <name> - report draft` title line dropped (that title now exists one level up). Headings that would end up deeper than the template actually supports (level 3) are converted to **bold paragraphs** instead of ever-deeper heading syntax, so nothing silently renders as unstyled `####` text.
@@ -424,18 +425,24 @@ This produces `draft.md` with:
 
 Pass `--creds` to include `creds/creds.txt` for every box, same as `mkbox -r --creds`.
 
-**Converting to ODT.** If you want something closer to a finished document instead of raw Markdown, pass `--odt=<path-to-template.odt>` (or just `--odt` if you've already converted with that same template before - see below) and `mkbox -a` also produces `<outfile>.odt`, styled using the official exam report template's own heading styles, via `pandoc --reference-doc`:
+**Converting to ODT.** Pass `--odt` and `mkbox -a` also produces `<outfile>.odt` - a real document, not just differently-styled Markdown:
 
 ```
-mkbox -a draft.md --odt=~/OSCP-Exam-Report.odt lame dc01 dc02 filesrv03
+mkbox -a draft.md --odt --author="Jane Q. Tester" lame dc01 dc02 filesrv03
 ```
 
-This needs `pandoc` installed; if it isn't, `mkbox` says so and skips the ODT step (the Markdown draft is still produced). A few things worth knowing:
+By default (no `=path`, and `$MKBOX_ODT_TEMPLATE` unset) this uses mkbox's own bundled template (`templates/mkbox-default.odt`, shipped alongside the script), which needs nothing from you and gives you, entirely deterministically:
 
-- **It copies the template's styles, not its content.** The cover page, table of contents, page numbers and any boilerplate text in the official template aren't reproduced - you're still expected to either paste the generated body text into a copy of the real template, or treat the ODT as a freshly-styled document and add that front matter yourself by hand.
-- Some ODT templates (including OffSec's own) name their heading styles `Heading1`/`Heading2`/`Heading3` instead of pandoc's own `Heading 1`/`Heading 2` convention - without extra handling, `--reference-doc` would copy the style *definitions* but nothing in the generated document would actually reference them, so every heading would silently render as plain body text. `mkbox` detects this and patches the generated file to use whichever naming the template actually uses, after pandoc runs.
+- **A real cover page** - title, your name (`--author`, or set `$MKBOX_AUTHOR` once instead of typing it every time), and the date - on its own page.
+- **A real Table of Contents.** Pandoc and LibreOffice/Word build the field structure, but don't actually compute page numbers at generation time - open the ODT and do **Tools > Update > All** once (or right-click the TOC and choose **Update Index**) and it fills in correctly, exactly as it would for any other document with a TOC field. This is a one-click, completely normal step for any ODT/DOCX with a table of contents, not a sign anything is broken.
+- **Automatically numbered headings** (`1`, `1.1`, `1.1.1`, matching the Independent Challenges / Active Directory Set structure `mkbox -a` already builds), and **page numbers** in the footer - both wired up in the bundled template's styles, so there's nothing left to configure.
+
+This is why the OffSec exam guide's note on reporting flexibility (any reasonable tool/workflow is fine, as long as the final report is a clear PDF write-up of what you did) matters here: you are **not** required to submit on OffSec's own template, so there's no need to track down your own copy of it or point `--odt` at one. If you'd rather use a different template anyway (OffSec's own, or your own company's), you still can - pass `--odt=<path-to-template.odt>`, or set `$MKBOX_ODT_TEMPLATE` once so you can leave the path off on later runs. A few things worth knowing either way:
+
+- **It copies the template's styles, not its original content.** Any boilerplate text that was already written into the *body* of a template you point `--odt` at (OffSec's own included) isn't reproduced - only mkbox's own bundled template gets a cover page and TOC, generated fresh for every draft, since those are built from the Markdown itself, not copied out of any .odt. Pointing `--odt` at a different template still gets you a cover page, TOC and forced page breaks the same way (mkbox patches a page-break style into it if it doesn't have one) - just not that template's own original wording or layout beyond its styles.
+- Some ODT templates (including OffSec's own) name their heading styles `Heading1`/`Heading2`/`Heading3` instead of pandoc's own `Heading 1`/`Heading 2` convention - without extra handling, `--reference-doc` would copy the style *definitions* but nothing in the generated document would actually reference them, so every heading would silently render as plain body text. `mkbox` detects this and patches the generated file to use whichever naming the template actually uses, after pandoc runs. (The bundled default template already matches pandoc's own naming, so this never triggers for it.)
 - The Proof checklist (`- [x] local.txt: ...`) is Markdown task-list syntax; converted at face value it renders as a Unicode checkbox glyph, and most ODT templates' body font (including OffSec's own) doesn't have that glyph, so it shows up as an empty box instead of a check mark. `mkbox` tells pandoc to read it as plain text instead, so it comes through as `[x] local.txt: ...` - legible, if not styled as a real checkbox.
-- You can leave off the path on later runs (`--odt` with no `=path`) if you export `MKBOX_ODT_TEMPLATE=~/OSCP-Exam-Report.odt` once (your shell profile, say); `mkbox` falls back to that. With neither `--odt=<path>` nor `$MKBOX_ODT_TEMPLATE` set, it says so and skips the ODT step rather than guessing a template.
+- This needs `pandoc` installed; if it isn't, `mkbox` says so and skips the ODT step (the Markdown draft is still produced).
 
 ## What it does and doesn't do
 
@@ -467,7 +474,8 @@ The whole tool is a single readable bash script (`mkbox`), so it is easy to audi
 - `mkbox` expects GNU `find`, `date` and `realpath` (standard on Kali and most Linux distros).
 - The password-masking rules are written in portable awk and were tested with `mawk` (Kali's default `awk`).
 - `mkbox -a` caps nested heading depth at 3 levels to match what the official exam report template itself supports; anything a box's own report would otherwise put deeper becomes a bold paragraph instead of a numbered heading. It also rewrites an unfilled `notes.md` placeholder bullet as `_(nothing recorded)_` in the assembled draft only - your live `notes.md` and each box's own standalone `mkbox -r` report are untouched.
-- `--odt` needs `pandoc` and (for the official exam report template specifically) `python3` on `$PATH` for the heading-style patch in [Active Directory sets and assembling the final report](#active-directory-sets-and-assembling-the-final-report); without `python3` it silently skips that one patch rather than failing, so headings may render unstyled if your template uses non-standard style names. It also only copies the template's styles, not its cover page, TOC, or any other content.
+- `--odt` needs `pandoc` on `$PATH`, plus `python3` for the heading-style and forced-page-break patches described in [Active Directory sets and assembling the final report](#active-directory-sets-and-assembling-the-final-report); without `python3` those patches are silently skipped rather than failing, which (only when pointed at a custom, non-bundled template) can mean unstyled headings or a missing page break before the cover page / TOC.
+- The Table of Contents in a `--odt` output needs one manual step: open the file and do Tools > Update > All (or right-click it and choose Update Index) so LibreOffice/Word fills in the real page numbers. This is ordinary behavior for any document with a TOC field, not something mkbox could skip - pandoc and LibreOffice/Word don't compute final page numbers until the document is actually laid out by one of them.
 
 ## Development
 

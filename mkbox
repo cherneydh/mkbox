@@ -23,7 +23,11 @@
 
 set -euo pipefail
 
-VERSION="1.4.1"
+VERSION="1.4.2"
+
+# Where mkbox itself lives, so it can find its bundled templates/ (see --odt) regardless of which
+# directory it was invoked from or whether $0 is a symlink.
+MKBOX_SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)"
 
 # Written for bash 4.4+ (empty arrays under `set -u`, associative arrays); developed on 5.2.
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
@@ -64,7 +68,7 @@ usage() {
 Usage: mkbox [-n|--no-shell] <boxname|path> [target-ip] [--ad]
        mkbox -c|--clean  <boxname|path>
        mkbox -r|--report [--creds] <boxname|path>
-       mkbox -a|--assemble <outfile.md> [--odt[=template.odt]] [--creds] <box1> [box2 ...]
+       mkbox -a|--assemble <outfile.md> [--odt[=template.odt]] [--author="Name"] [--creds] <box1> [box2 ...]
        mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PAT|path]
        mkbox -l|--list
        mkbox -V|--version
@@ -693,16 +697,25 @@ demote_headings() {
   '
 }
 
-# fix_odt_heading_styles <odt_file> <template_file>: pandoc's ODT writer always references heading
-# paragraph styles under the name "Heading 1", "Heading 2", etc. (encoded as "Heading_20_N"). Some
-# ODT templates - including OffSec's own exam report template - instead name theirs "Heading1",
-# "Heading2" with no separator at all (a leftover of whatever tool produced the .odt). When the
-# names don't match, --reference-doc still copies the template's style *definitions* into the
-# output, but nothing in the document actually points at them, so every heading silently renders as
-# plain body text with no visual distinction. This patches the generated file's content.xml in
-# place, after the fact, to reference whichever name variant the template itself actually uses, for
-# each outline level pandoc emitted. A no-op (silent success) if python3 is missing or the template
-# uses pandoc's own naming already - either way, nothing about the file's content is at risk.
+# fix_odt_heading_styles <odt_file> <template_file>: two independent, unrelated patches applied to
+# an already-generated ODT, both skipped (silent no-op) if python3 is missing - either way, nothing
+# about the file's content is at risk, since pandoc already produced a complete, valid ODT before
+# this ever runs:
+#
+# 1. Pandoc's ODT writer always references heading paragraph styles under the name "Heading 1",
+#    "Heading 2", etc. (encoded as "Heading_20_N"). Some ODT templates - including OffSec's own exam
+#    report template - instead name theirs "Heading1", "Heading2" with no separator at all (a
+#    leftover of whatever tool produced the .odt). When the names don't match, --reference-doc still
+#    copies the template's style *definitions* into the output, but nothing in the document actually
+#    points at them, so every heading silently renders as plain body text with no visual
+#    distinction. This rewrites the generated file's content.xml to reference whichever name variant
+#    the template itself actually uses, for each outline level pandoc emitted.
+# 2. assemble_main's cover page and the blank page before the Table of Contents both depend on a
+#    paragraph style named "MkboxPageBreak" (forced page-break-before) existing somewhere in the
+#    document. mkbox's own bundled template (templates/mkbox-default.odt) already defines it, but an
+#    external --odt template (OffSec's own, say) won't - so this adds a minimal definition of that
+#    style directly to the output's styles.xml when it's missing, rather than leaving the cover page
+#    and body to run together on one page.
 fix_odt_heading_styles() {
   command -v python3 >/dev/null 2>&1 || return 0
   python3 -I - "$1" "$2" <<'PYEOF'
@@ -725,8 +738,17 @@ def heading_style_names(path):
 
 tpl_names = heading_style_names(tpl_path)
 needs_fix = {n: real for n, real in tpl_names.items() if real != f'Heading_20_{n}'}
-if not needs_fix:
+
+with zipfile.ZipFile(odt_path) as z:
+    out_styles = z.read('styles.xml').decode('utf-8', 'replace') if 'styles.xml' in z.namelist() else ''
+needs_pagebreak_style = 'style:name="MkboxPageBreak"' not in out_styles
+
+if not needs_fix and not needs_pagebreak_style:
     sys.exit(0)
+
+PAGEBREAK_STYLE = ('<style:style style:name="MkboxPageBreak" style:family="paragraph" '
+                   'style:parent-style-name="Standard">'
+                   '<style:paragraph-properties fo:break-before="page"/></style:style>')
 
 tmp = odt_path + '.tmp'
 with zipfile.ZipFile(odt_path) as zin, zipfile.ZipFile(tmp, 'w') as zout:
@@ -736,10 +758,16 @@ with zipfile.ZipFile(odt_path) as zin, zipfile.ZipFile(tmp, 'w') as zout:
         if item.filename == 'mimetype':
             continue
         data = zin.read(item.filename)
-        if item.filename == 'content.xml':
+        if item.filename == 'content.xml' and needs_fix:
             text = data.decode('utf-8')
             for n, real in needs_fix.items():
                 text = text.replace(f'"Heading_20_{n}"', f'"{real}"')
+            data = text.encode('utf-8')
+        if item.filename == 'styles.xml' and needs_pagebreak_style:
+            text = data.decode('utf-8')
+            marker = '</office:styles>'
+            if marker in text:
+                text = text.replace(marker, PAGEBREAK_STYLE + marker, 1)
             data = text.encode('utf-8')
         zout.writestr(item, data, compress_type=zipfile.ZIP_DEFLATED)
 os.replace(tmp, odt_path)
@@ -778,15 +806,15 @@ _assemble_collect_warnings() {
 # sections (no persistence or cleanup expected on exam hosts), so this doesn't generate stubs for
 # those either; check the guide yourself before adding anything like that.
 assemble_main() {
-  local with_creds="$1" odt="$2" odt_tpl="$3"; shift 3
+  local with_creds="$1" odt="$2" odt_tpl="$3" author="$4"; shift 4
   local outfile="${1:-}"
   if [[ -z "$outfile" ]]; then
-    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]] [--creds] <box1> [box2 ...]" >&2
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]] [--author=\"Name\"] [--creds] <box1> [box2 ...]" >&2
     return 1
   fi
   shift
   if [[ $# -eq 0 ]]; then
-    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]] [--creds] <box1> [box2 ...]" >&2
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]] [--author=\"Name\"] [--creds] <box1> [box2 ...]" >&2
     return 1
   fi
 
@@ -822,6 +850,13 @@ assemble_main() {
     echo "TODO: Information Gathering / Service Enumeration / Penetration. Check the current OSCP"
     echo "Exam Guide before writing a Maintaining Access / House Cleaning section - it doesn't ask"
     echo "for backdoors or cleanup on exam hosts."
+    echo
+    echo "## Tools Used"
+    echo
+    echo "In addition to the standard toolset (nmap, Metasploit, etc. - list anything else you used"
+    echo "here), this report, its supporting notes, timeline and screenshots were compiled with"
+    echo "\`mkbox\` v$VERSION (<https://github.com/cherneydh/mkbox>), a bash-based session logger and"
+    echo "report collator used throughout testing."
     echo
     local e d n ip i=1
     local -a box_warnings=()
@@ -869,10 +904,19 @@ assemble_main() {
   fi
 
   if [[ "$odt" -eq 1 ]]; then
+    local default_tpl="$MKBOX_SCRIPT_DIR/templates/mkbox-default.odt"
     local tpl="${odt_tpl:-${MKBOX_ODT_TEMPLATE:-}}"
+    local using_default=0
     if [[ -z "$tpl" ]]; then
-      echo "mkbox: --odt needs a template - pass --odt=/path/to/template.odt or set \$MKBOX_ODT_TEMPLATE" >&2
-      return 1
+      if [[ -f "$default_tpl" ]]; then
+        tpl="$default_tpl"
+        using_default=1
+      else
+        echo "mkbox: --odt needs a template - pass --odt=/path/to/template.odt or set \$MKBOX_ODT_TEMPLATE" >&2
+        echo "       (mkbox normally falls back to its own bundled templates/mkbox-default.odt - that" >&2
+        echo "       file is missing from this install, which only happens if mkbox was copied without it)" >&2
+        return 1
+      fi
     fi
     [[ -f "$tpl" ]] || { echo "mkbox: --odt template not found: $tpl" >&2; return 1; }
     if ! command -v pandoc >/dev/null 2>&1; then
@@ -880,15 +924,58 @@ assemble_main() {
       return 1
     fi
     local odtfile="${outfile%.md}.odt"
+    local odtsrc; odtsrc="$(mktemp "${TMPDIR:-/tmp}/mkbox-odtsrc.XXXXXX.md")"
+    # Build a cover page (title/author/date), a page break, and a real ODT table-of-contents field
+    # ahead of the actual report body - none of this belongs in the plain outfile.md draft itself
+    # (nobody wants YAML front matter and raw ODT XML cluttering the file they're also reading as
+    # Markdown), so it's assembled into a separate, temporary source file that's only ever fed to
+    # pandoc. The {=opendocument} raw blocks pass straight through into the ODT's content.xml.
+    # "MkboxPageBreak" is a paragraph style every mkbox-produced ODT ends up with - defined in the
+    # bundled template, or added by fix_odt_heading_styles below if a custom --odt template lacks it.
+    {
+      echo "---"
+      echo "title: \"OSCP Exam Report\""
+      [[ -n "$author" ]] && printf 'author: "%s"\n' "${author//\"/\\\"}"
+      echo "date: \"$(date '+%Y-%m-%d')\""
+      echo "---"
+      echo
+      echo '```{=opendocument}'
+      echo '<text:p text:style-name="MkboxPageBreak"/>'
+      echo '```'
+      echo
+      # No manual "Table of Contents" label here - LibreOffice/Word adds that heading itself the
+      # first time the index is updated (see the --odt confirmation message), so a hand-written one
+      # would end up duplicated right above it.
+      echo '```{=opendocument}'
+      echo '<text:table-of-content text:name="mkboxTOC"><text:table-of-content-source text:outline-level="3"/><text:index-body/></text:table-of-content>'
+      echo '```'
+      echo
+      echo '```{=opendocument}'
+      echo '<text:p text:style-name="MkboxPageBreak"/>'
+      echo '```'
+      echo
+      # everything from "# High-Level Summary" onward - i.e. the real report body, minus the
+      # bold title/byline line at the top of outfile.md, which the cover page above replaces
+      sed -n '/^# High-Level Summary$/,$p' "$outfile"
+    } > "$odtsrc"
     # -f markdown-task_lists: the Proof checklist's "- [x] local.txt: ..." lines are GFM task-list
-    # syntax. Pandoc's ODT writer renders those as Unicode checkbox glyphs (U+2610/U+2612); the
-    # official exam report template's font doesn't have them, so they show up as empty tofu boxes
-    # instead of a check mark. Disabling the extension makes pandoc read "[x]"/"[ ]" as plain text,
-    # which is what actually renders cleanly here.
-    if pandoc "$outfile" -f markdown-task_lists --reference-doc="$tpl" -o "$odtfile"; then
+    # syntax. Pandoc's ODT writer renders those as Unicode checkbox glyphs (U+2610/U+2612); most
+    # templates' body font (including OffSec's own) doesn't have them, so they show up as empty
+    # tofu boxes instead of a check mark. Disabling the extension makes pandoc read "[x]"/"[ ]" as
+    # plain text, which is what actually renders cleanly here.
+    if pandoc "$odtsrc" -f markdown-task_lists --reference-doc="$tpl" -o "$odtfile"; then
+      rm -f "$odtsrc"
       fix_odt_heading_styles "$odtfile" "$tpl"
-      echo "ODT draft:       $odtfile  (styled from $tpl - still check the title page, TOC and page numbers by hand)"
+      if [[ "$using_default" -eq 1 ]]; then
+        echo "ODT draft:       $odtfile  (cover page, numbered headings and page numbers from mkbox's own"
+        echo "                 bundled template; open it and do Tools > Update All once so the Table of"
+        echo "                 Contents - whose structure is there, but not its page numbers yet - fills in)"
+      else
+        echo "ODT draft:       $odtfile  (styled from $tpl; open it and do Tools > Update All once so the"
+        echo "                 Table of Contents fills in - still check the cover page and page numbers by hand)"
+      fi
     else
+      rm -f "$odtsrc"
       echo "mkbox: pandoc failed to build the ODT - the markdown draft is still at $outfile" >&2
       return 1
     fi
@@ -1083,6 +1170,7 @@ WITH_CREDS=0
 AD_FLAG=0
 ODT=0
 ODT_TEMPLATE=""
+AUTHOR=""
 POSITIONAL=()
 # Flags and the box name/IP can come in any order (mkbox lame -n, mkbox -n lame, ...); only the
 # first two non-flag args are ever used (box name, then IP), so this doesn't need getopt-style
@@ -1101,6 +1189,7 @@ while [[ $# -gt 0 ]]; do
     --ad)           AD_FLAG=1 ;;
     --odt)          ODT=1 ;;
     --odt=*)        ODT=1; ODT_TEMPLATE="${1#--odt=}" ;;
+    --author=*)     AUTHOR="${1#--author=}" ;;
     -h|--help)      usage 0 ;;
     --)             shift; POSITIONAL+=("$@"); break ;;
     -*)             echo "mkbox: unknown option $1" >&2; usage 1 ;;
@@ -1116,7 +1205,7 @@ if [[ "$MODE" == "list" ]]; then
 fi
 
 if [[ "$MODE" == "assemble" ]]; then
-  assemble_main "$WITH_CREDS" "$ODT" "$ODT_TEMPLATE" "$@"
+  assemble_main "$WITH_CREDS" "$ODT" "$ODT_TEMPLATE" "${AUTHOR:-${MKBOX_AUTHOR:-}}" "$@"
   exit $?
 fi
 
