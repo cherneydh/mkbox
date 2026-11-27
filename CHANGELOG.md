@@ -22,6 +22,13 @@ installer, and a more professional default report template.
   dependencies). It verifies the installed tree is complete, then lists any missing dependencies with the
   matching `apt` command.
 
+- **`mkbox --doctor`** (`-d`): reports required and optional dependencies, whether the install is
+  complete (bundled template and PDF helper found next to the script), and the `apt` command for what's
+  missing. Exits nonzero only if something required is absent. `install.sh --check` now just runs it.
+- **`--title="Text"`** (and `$MKBOX_TITLE`) for `mkbox -a` / `assemble`: sets the report title on the
+  ODT/PDF cover page and the Markdown draft's heading line, for anything other than the default
+  "OSCP Exam Report". Same precedence as `--author`/`--osid`: the flag wins over the environment variable.
+
 ### Changed
 
 - **Refreshed default ODT template.** Arial 10.5pt body; upright navy headings (level 1 ruled);
@@ -34,7 +41,10 @@ installer, and a more professional default report template.
 - tests/smoke.sh: the in-shell `assemble` `--odt`/`--pdf` checks now skip when pandoc is missing; the
   outline-numbering check no longer depends on how pandoc lays out `styles.xml`; the `$TARGET`/`$LOCAL`
   test now passes those variables to the box shell unexpanded. New checks cover `install.sh`.
-- CI installs pandoc and also lints `install.sh`.
+- CI installs pandoc, lints `install.sh`, and runs the suite against both the distro's pandoc and the
+  latest upstream release (the latter is allowed to fail, as an early warning rather than a gate).
+- `.gitattributes` pins LF line endings and marks the template `.odt` as binary.
+- tests/smoke.sh: 14 new checks (installer, `--title`, `--doctor`); 260/260 passing.
 
 ## 1.4.5
 

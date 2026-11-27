@@ -29,7 +29,7 @@ A small bash utility for organizing and documenting penetration-testing practice
 
 ```
 git clone https://github.com/cherneydh/mkbox && cd mkbox
-chmod +x install.sh && ./install.sh     # sudo ./install.sh for system-wide; ./install.sh --check just reports dependencies
+chmod +x install.sh && ./install.sh     # sudo ./install.sh for system-wide; ./install.sh --check (or `mkbox --doctor` any time later) reports dependencies
 ```
 
 (The `chmod +x` is only needed if your checkout dropped the executable bit, e.g. a zip download; `bash install.sh` works the same. The installer itself sets the right modes on everything it installs.)
@@ -75,7 +75,8 @@ mkbox -c|--clean  <boxname|path>
 mkbox -r|--report [--creds] <boxname|path>
 mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PATTERN|path]
 mkbox -l|--list
-mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--creds] <box1> [box2 ...]
+mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--title="Text"] [--creds] <box1> [box2 ...]
+mkbox -d|--doctor
 mkbox -V|--version
 ```
 
@@ -93,6 +94,7 @@ mkbox -V|--version
 | `mkbox -p lame`            | Opens the box's scratchpad in `$EDITOR` (see [Scratchpad](#scratchpad))          |
 | `mkbox -l`                 | Lists boxes in the current directory with target IP and proof status             |
 | `mkbox -a draft.md lame dc01 dc02` | Collates several boxes' own reports into one document draft - see [below](#active-directory-sets-and-assembling-the-final-report) |
+| `mkbox -d`                 | Doctor: checks dependencies and that the install is complete (template, PDF helper) |
 | `mkbox -V`                 | Prints the version                                                               |
 
 If the box doesn't exist yet, `mkbox` creates it and says so (`creating new box 'lame' in ...`, followed by a `Happy Hacking :)`); if it does, it says `re-entering 'lame'`. So a typo like `mkbox lmae` announces that it is making a new box instead of quietly doing it - and if that typo'd name is suspiciously close to a box that already exists next to it (`dc01` vs. `dc-01`, `smok` vs. `smoke`), mkbox names the existing box it's close to, right there in the same message. It still creates `lmae` either way - this never blocks you, it just makes the mistake visible before you've put real recon, screenshots or findings into the wrong directory by accident.
@@ -518,7 +520,7 @@ mkbox -a draft.md --odt --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02 
 
 By default (no `=path`, and `$MKBOX_ODT_TEMPLATE` unset) this uses mkbox's own bundled template (`templates/mkbox-default.odt`, shipped alongside the script), which needs nothing from you and gives you, entirely deterministically:
 
-- **A real cover page** - title, your OSID (`--osid`, or set `$MKBOX_OSID` once - OffSec expects it somewhere on the report, this just saves retyping it), your name (`--author`, or set `$MKBOX_AUTHOR` once instead of typing it every time), and the date - on its own page. Both `--osid` and `--author` are optional and independent of each other.
+- **A real cover page** - title (`OSCP Exam Report` by default; `--title="Acme Q4 Pentest"`, or set `$MKBOX_TITLE`, for anything else), your OSID (`--osid`, or set `$MKBOX_OSID` once - OffSec expects it somewhere on the report, this just saves retyping it), your name (`--author`, or set `$MKBOX_AUTHOR` once instead of typing it every time), and the date - on its own page. Both `--osid` and `--author` are optional and independent of each other.
 - **A real Table of Contents.** Pandoc and LibreOffice/Word build the field structure, but don't actually compute page numbers at generation time - open the ODT and do **Tools > Update > All** once (or right-click the TOC and choose **Update Index**) and it fills in correctly, exactly as it would for any other document with a TOC field. This is a one-click, completely normal step for any ODT/DOCX with a table of contents, not a sign anything is broken.
 - **Automatically numbered headings** (`1`, `1.1`, `1.1.1`, matching the Independent Challenges / Active Directory Set structure `mkbox -a` already builds), and **page numbers** in the footer - both wired up in the bundled template's styles, so there's nothing left to configure.
 

@@ -6,6 +6,7 @@
 #         mkbox -r|--report [--creds] <boxname|path> build a report draft + evidence tarball
 #         mkbox -p|--pad <box|-g> [edit|add|cmd|show|grep|path]   per-box (or global -g) scratchpad
 #         mkbox -l|--list                            list boxes in the current directory
+#         mkbox -d|--doctor                          check dependencies and the install
 #         mkbox -V|--version                         print the version
 #
 # The box is created in the CURRENT directory:
@@ -68,9 +69,10 @@ usage() {
 Usage: mkbox [-n|--no-shell] <boxname|path> [target-ip] [--ad]
        mkbox -c|--clean  <boxname|path>
        mkbox -r|--report [--creds] <boxname|path>
-       mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--creds] <box1> [box2 ...]
+       mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--title="Text"] [--creds] <box1> [box2 ...]
        mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PAT|path]
        mkbox -l|--list
+       mkbox -d|--doctor
        mkbox -V|--version
 U
   exit "${1:-1}"
@@ -976,15 +978,15 @@ _assemble_export_pdf() {
 # sections (no persistence or cleanup expected on exam hosts), so this doesn't generate stubs for
 # those either; check the guide yourself before adding anything like that.
 assemble_main() {
-  local with_creds="$1" odt="$2" odt_tpl="$3" author="$4" pdf="$5" osid="$6"; shift 6
+  local with_creds="$1" odt="$2" odt_tpl="$3" author="$4" pdf="$5" osid="$6" title="${7:-OSCP Exam Report}"; shift 7
   local outfile="${1:-}"
   if [[ -z "$outfile" ]]; then
-    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--creds] <box1> [box2 ...]" >&2
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--title=\"Text\"] [--creds] <box1> [box2 ...]" >&2
     return 1
   fi
   shift
   if [[ $# -eq 0 ]]; then
-    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--creds] <box1> [box2 ...]" >&2
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--title=\"Text\"] [--creds] <box1> [box2 ...]" >&2
     return 1
   fi
 
@@ -1003,7 +1005,7 @@ assemble_main() {
     # The title is a bold line, not a heading: the official template's own 3 defined heading levels
     # (matching its own 1 / 1.1 / 1.1.1 numbering) are needed below for Target -> per-box sections,
     # with none to spare for a document title too.
-    echo "**OSCP Exam Report - assembled draft**"
+    printf '**%s - assembled draft**\n' "$title"
     echo
     echo "_Assembled by mkbox $VERSION on $(date '+%F %T') from $(( ${#standalone[@]} + ${#adset[@]} )) box(es). This only pulls together what's in each box - fill in the TODOs below yourself._"
     echo
@@ -1110,7 +1112,7 @@ assemble_main() {
     # bundled template, or added by fix_odt_heading_styles below if a custom --odt template lacks it.
     {
       echo "---"
-      echo "title: \"OSCP Exam Report\""
+      printf 'title: "%s"\n' "${title//\"/\\\"}"
       [[ -n "$osid" ]] && printf 'subtitle: "OSID: %s"\n' "${osid//\"/\\\"}"
       [[ -n "$author" ]] && printf 'author: "%s"\n' "${author//\"/\\\"}"
       echo "date: \"$(date '+%Y-%m-%d')\""
@@ -1362,6 +1364,7 @@ ODT_TEMPLATE=""
 PDF=0
 AUTHOR=""
 OSID=""
+TITLE=""
 POSITIONAL=()
 # Flags and the box name/IP can come in any order (mkbox lame -n, mkbox -n lame, ...); only the
 # first two non-flag args are ever used (box name, then IP), so this doesn't need getopt-style
@@ -1383,6 +1386,8 @@ while [[ $# -gt 0 ]]; do
     --pdf)          ODT=1; PDF=1 ;;
     --author=*)     AUTHOR="${1#--author=}" ;;
     --osid=*)       OSID="${1#--osid=}" ;;
+    --title=*)      TITLE="${1#--title=}" ;;
+    -d|--doctor)    MODE=doctor ;;
     -h|--help)      usage 0 ;;
     --)             shift; POSITIONAL+=("$@"); break ;;
     -*)             echo "mkbox: unknown option $1" >&2; usage 1 ;;
@@ -1392,13 +1397,51 @@ while [[ $# -gt 0 ]]; do
 done
 set -- "${POSITIONAL[@]}"
 
+# doctor: report which optional pieces are present, and whether this install is complete (the
+# bundled template and PDF helper must sit next to the real script - see install.sh). Exit status is
+# nonzero only when something *required* is missing.
+doctor() {
+  local have_req=1 f t
+  local -a apt=()
+  _dr() { printf '  %-9s %s\n' "$1" "$2"; }
+  echo "mkbox $VERSION  (bash ${BASH_VERSION%%[( ]*}, installed at $MKBOX_SCRIPT_DIR)"
+  echo "Required:"
+  for t in script tar find sed awk grep date; do
+    if command -v "$t" >/dev/null 2>&1; then _dr ok "$t"; else _dr MISSING "$t"; have_req=0; fi
+  done
+  echo "Optional:"
+  command -v perl  >/dev/null 2>&1 && _dr ok perl  || { apt+=(perl); _dr missing "perl           (log cleanup falls back to a cruder sed)"; }
+  command -v nmap  >/dev/null 2>&1 && _dr ok nmap  || { apt+=(nmap); _dr missing "nmap           (portscan/udpscan/svcscan)"; }
+  if command -v xclip >/dev/null 2>&1 || command -v wl-paste >/dev/null 2>&1; then _dr ok "xclip/wl-clipboard"
+  else apt+=(xclip); _dr missing "xclip or wl-clipboard   (shot)"; fi
+  command -v pandoc >/dev/null 2>&1 && _dr ok pandoc || { apt+=(pandoc); _dr missing "pandoc         (assemble --odt / --pdf)"; }
+  command -v soffice >/dev/null 2>&1 && _dr ok soffice || { apt+=(libreoffice-writer); _dr missing "soffice        (assemble --pdf: libreoffice-writer)"; }
+  if { command -v python3 >/dev/null 2>&1 && python3 -c 'import uno' >/dev/null 2>&1; } \
+     || [[ -x /usr/lib/libreoffice/program/python ]]; then _dr ok "python uno"
+  else apt+=(python3-uno); _dr missing "python3 uno    (assemble --pdf: python3-uno)"; fi
+  echo "Install:"
+  for f in templates/mkbox-default.odt lib/mkbox-update-toc.py; do
+    if [[ -f "$MKBOX_SCRIPT_DIR/$f" ]]; then _dr ok "$f"
+    else _dr MISSING "$f   (copied the bare script? use install.sh)"; have_req=0; fi
+  done
+  if [[ ${#apt[@]} -gt 0 ]] && command -v apt-get >/dev/null 2>&1; then
+    echo "On Debian/Kali/Ubuntu: sudo apt install ${apt[*]}"
+  fi
+  [[ "$have_req" -eq 1 ]]
+}
+
+if [[ "$MODE" == "doctor" ]]; then
+  doctor
+  exit $?
+fi
+
 if [[ "$MODE" == "list" ]]; then
   list_boxes
   exit 0
 fi
 
 if [[ "$MODE" == "assemble" ]]; then
-  assemble_main "$WITH_CREDS" "$ODT" "$ODT_TEMPLATE" "${AUTHOR:-${MKBOX_AUTHOR:-}}" "$PDF" "${OSID:-${MKBOX_OSID:-}}" "$@"
+  assemble_main "$WITH_CREDS" "$ODT" "$ODT_TEMPLATE" "${AUTHOR:-${MKBOX_AUTHOR:-}}" "$PDF" "${OSID:-${MKBOX_OSID:-}}" "${TITLE:-${MKBOX_TITLE:-OSCP Exam Report}}" "$@"
   exit $?
 fi
 

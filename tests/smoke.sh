@@ -596,6 +596,28 @@ fi
 bash "$INST_ROOT/install.sh" --prefix "$INST" --uninstall > /dev/null 2>&1
 check "install.sh: --uninstall removes it"                      bash -c "[ ! -e '$INST/bin/mkbox' ] && [ ! -d '$INST/share/mkbox' ]"
 
+# --- --title / --doctor ---------------------------------------------------------------------------
+echo "title and doctor"
+"$MK" -a "$T/titled.md" --title='Acme "Q4" Pentest' smoke > /dev/null 2>&1
+check "--title: appears in the assembled draft"          has "$T/titled.md" 'Acme "Q4" Pentest - assembled draft'
+"$MK" -a "$T/untitled.md" smoke > /dev/null 2>&1
+check "--title: default is still OSCP Exam Report"       has "$T/untitled.md" "OSCP Exam Report - assembled draft"
+MKBOX_TITLE="From Env" "$MK" -a "$T/envtitled.md" smoke > /dev/null 2>&1
+check "--title: \$MKBOX_TITLE is honored"                has "$T/envtitled.md" "From Env - assembled draft"
+check "--title: usage mentions the flag"                 bash -c "'$MK' -h 2>&1 | grep -q -- '--title'"
+if command -v pandoc >/dev/null 2>&1; then
+  "$MK" -a "$T/titled2.md" --odt --title="Custom Cover Title" smoke > /dev/null 2>&1
+  rm -rf "$T/odttitle" && mkdir "$T/odttitle" && (cd "$T/odttitle" && unzip -o -q ../titled2.odt)
+  check "--title: lands on the ODT cover page"           has "$T/odttitle/content.xml" "Custom Cover Title"
+fi
+"$MK" --doctor > "$T/doctor.out" 2>&1; DOCTOR_RC=$?
+check "--doctor: reports version and install checks"     bash -c "grep -q '^Install:' '$T/doctor.out' && grep -q 'templates/mkbox-default.odt' '$T/doctor.out'"
+check "--doctor: bundled files are found in the repo"    bash -c "! grep -q MISSING '$T/doctor.out'"
+check "--doctor: exits 0 when nothing required is missing" bash -c "[ '$DOCTOR_RC' -eq 0 ]"
+BARE="$T/bare" && mkdir -p "$BARE" && cp "$MK" "$BARE/mkbox"
+"$BARE/mkbox" --doctor > "$T/doctor-bare.out" 2>&1; BARE_RC=$?
+check "--doctor: flags a bare script copy (no template/lib)" bash -c "[ '$BARE_RC' -ne 0 ] && grep -q 'MISSING.*templates/mkbox-default.odt' '$T/doctor-bare.out'"
+
 # --- re-entering vs typos -----------------------------------------------------------------------
 echo "new vs existing"
 printf 'exit\n' | "$MK" smoke > "$T/e1.out" 2>&1

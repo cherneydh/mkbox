@@ -28,43 +28,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-have() { command -v "$1" >/dev/null 2>&1; }
-
-check_deps() {
-  local missing_req=() missing_opt=() apt=()
-  (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) \
-    || missing_req+=("bash >= 4.4 (found ${BASH_VERSION})")
-  local t
-  for t in script tar find sed awk grep date; do have "$t" || missing_req+=("$t"); done
-  have script || apt+=(bsdutils)
-  have perl   || { missing_opt+=("perl (log cleanup falls back to a cruder sed)"); apt+=(perl); }
-  have nmap   || { missing_opt+=("nmap (portscan/udpscan/svcscan)"); apt+=(nmap); }
-  if ! have xclip && ! have wl-paste; then
-    missing_opt+=("xclip or wl-clipboard (shot)"); apt+=(xclip)
-  fi
-  have pandoc || { missing_opt+=("pandoc (assemble --odt / --pdf)"); apt+=(pandoc); }
-  if ! have soffice; then
-    missing_opt+=("libreoffice (assemble --pdf)"); apt+=(libreoffice-writer)
-  fi
-  if ! { have python3 && python3 -c 'import uno' 2>/dev/null; }; then
-    if have soffice && [[ -x /usr/lib/libreoffice/program/python ]]; then :; else
-      missing_opt+=("python3 'uno' module (assemble --pdf)"); apt+=(python3-uno)
-    fi
-  fi
-
-  if (( ${#missing_req[@]} )); then
-    echo "Missing required:"; printf '  - %s\n' "${missing_req[@]}"
-  fi
-  if (( ${#missing_opt[@]} )); then
-    echo "Missing optional (mkbox still works; these features degrade):"
-    printf '  - %s\n' "${missing_opt[@]}"
-  fi
-  if (( ${#apt[@]} )) && have apt-get; then
-    echo "On Debian/Kali/Ubuntu: sudo apt install ${apt[*]}"
-  fi
-  (( ${#missing_req[@]} == 0 && ${#missing_opt[@]} == 0 )) && echo "All dependencies present."
-  return $(( ${#missing_req[@]} > 0 ))
-}
+check_deps() { bash "$src/mkbox" --doctor; }
 
 if [[ "$action" == check ]]; then check_deps; exit $?; fi
 
