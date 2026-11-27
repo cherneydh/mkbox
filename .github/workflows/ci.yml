@@ -17,5 +17,8 @@ jobs:
           awk '/^cat > "\$RC_TMP" <<.EOF.$/{f=1;next} /^EOF$/{if(f){exit}} f' mkbox > "$RUNNER_TEMP/box.rc.sh"
           shellcheck -s bash -S warning "$RUNNER_TEMP/box.rc.sh"
 
+      - name: install pandoc (needed by the --odt / --pdf assemble checks)
+        run: sudo apt-get update && sudo apt-get install -y pandoc
+
       - name: smoke test
         run: bash tests/smoke.sh
