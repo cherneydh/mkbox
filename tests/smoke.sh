@@ -98,9 +98,23 @@ printf '%s\n' \
   'exit' | FAKE_TUN0=10.10.14.7 "$MK" smoke 10.10.10.9 > "$T/session.out" 2>&1
 check "banner says re-entering"          has "$T/session.out" "re-entering 'smoke'"
 # shellcheck disable=SC2016  # literal text: the banner prints the characters $LHOST=
-check "banner shows our tun0 address"    has "$T/session.out" '$LHOST=10.10.14.7'
+check "banner shows our tun0 address"    has "$T/session.out" '= 10.10.14.7'
 check "markproof: local ticked with value" has smoke/notes/notes.md "- [x] local.txt: 0123abcd"
 check "markproof: root is an alias for proof" has smoke/notes/notes.md "- [x] proof.txt:"
+
+# $TARGET/$LOCAL: friendlier aliases for $IP/$LHOST, so a command typed mid-engagement doesn't
+# need either memorized or retyped - must track $IP/$LHOST exactly, including through setip
+printf '%s\n' \
+  'echo "T1=$TARGET L1=$LOCAL"' \
+  'setip 10.10.10.55' \
+  'echo "T2=$TARGET"' \
+  'exit' | FAKE_TUN0=10.10.14.7 "$MK" smoke > "$T/aliases.out" 2>&1
+check "\$TARGET starts out equal to \$IP"        has "$T/aliases.out" "T1=10.10.10.9"
+check "\$LOCAL starts out equal to \$LHOST"      has "$T/aliases.out" "L1=10.10.14.7"
+check "\$TARGET follows setip immediately"       has "$T/aliases.out" "T2=10.10.10.55"
+printf '%s\n' 'boxinfo' 'exit' | FAKE_TUN0=10.10.14.7 "$MK" smoke > "$T/aliases2.out" 2>&1
+check "boxinfo: mentions \$TARGET alias"         has "$T/aliases2.out" "(also \$TARGET)"
+check "boxinfo: mentions \$LOCAL alias"          has "$T/aliases2.out" "(also \$LOCAL)"
 check "markproof: timeline note"         has smoke/notes/timeline.md "proof: local.txt marked done (0123abcd)"
 check "markproof: bad argument gives usage" has "$T/session.out" "usage: markproof local|proof"
 check "markproof: notes.md keeps its mode" bash -c "[ \"\$(stat -c %a smoke/notes/notes.md)\" != 600 ]"
@@ -118,6 +132,50 @@ check "addcred: timeline has username"   has smoke/notes/timeline.md "cred recor
 check "addcred: timeline has no password" lacks smoke/notes/timeline.md "Hunter2pw"
 check "creds.txt holds the password"     has smoke/creds/creds.txt "bob:Hunter2pw"
 check "creds.txt is mode 600"            mode smoke/creds/creds.txt 600
+
+# creds: lists what addcred recorded, and prints a ready-to-paste command block for one of them -
+# closes the "copy the password out of a file by hand" gap the same way proofshot already did for
+# the flag text. Its own dedicated box, not "smoke" - typing a password into this box's shell is
+# exactly what trips the leaked-password warning checked elsewhere, and that check is pinned to
+# "smoke" having exactly the one cred added to it earlier in this file.
+"$MK" -n credsbox 10.10.10.62 > /dev/null 2>&1
+printf '%s\n' 'addcred admin:Winter2026! rdp' 'addcred svc:Sup3rS3cr3t smb share' 'creds' 'creds 2' 'creds 99' 'exit' \
+  | "$MK" credsbox > "$T/creds.out" 2>&1
+check "creds: lists recorded entries with an index"   has "$T/creds.out" "1) "
+check "creds: lists the second entry too"             has "$T/creds.out" "2) "
+check "creds: per-entry view names the right user"    has "$T/creds.out" "Cred #2: svc : Sup3rS3cr3t"
+check "creds: per-entry view gives an evil-winrm line" has "$T/creds.out" "evil-winrm -i \$TARGET -u 'svc' -p 'Sup3rS3cr3t'"
+check "creds: per-entry view gives an smb line"        has "$T/creds.out" "smbclient -U 'svc%Sup3rS3cr3t'"
+check "creds: unknown index errors instead of guessing" has "$T/creds.out" "no entry #99"
+check "creds: with nothing recorded, says so"          bash -c "
+  '$MK' -n credsnobody 10.10.10.61 >/dev/null 2>&1
+  printf 'creds\nexit\n' | '$MK' credsnobody 2>&1 | grep -q 'nothing recorded yet'"
+rm -rf credsbox credsnobody
+
+# sethost: adds an /etc/hosts-style line for a domain name, idempotently, without clobbering a
+# conflicting existing entry - exercised against a throwaway MKBOX_HOSTS_FILE, never the real
+# /etc/hosts (this is a test suite, not something that should ever touch the machine it runs on).
+# Its own dedicated box, so its IP is never in question even if an earlier test in this file
+# reassigned "smoke"'s via setip.
+"$MK" -n sethostbox 10.10.10.63 > /dev/null 2>&1
+FAKE_HOSTS="$T/fake-hosts"
+: > "$FAKE_HOSTS"
+printf '%s\n' 'sethost dc01.corp.local corp.local' 'exit' \
+  | MKBOX_HOSTS_FILE="$FAKE_HOSTS" "$MK" sethostbox > "$T/sethost1.out" 2>&1
+check "sethost: confirms what it added"        has "$T/sethost1.out" "added '10.10.10.63  dc01.corp.local corp.local'"
+check "sethost: actually wrote the fake hosts file" has "$FAKE_HOSTS" "10.10.10.63	dc01.corp.local corp.local"
+printf '%s\n' 'sethost dc01.corp.local' 'exit' \
+  | MKBOX_HOSTS_FILE="$FAKE_HOSTS" "$MK" sethostbox > "$T/sethost2.out" 2>&1
+check "sethost: re-adding the same mapping is a no-op, not a duplicate" has "$T/sethost2.out" "already in"
+check "sethost: no duplicate line was written"  bash -c "[ \"\$(grep -c 'dc01.corp.local' '$FAKE_HOSTS')\" -eq 1 ]"
+printf '%s\n' 'sethost dc01.corp.local --ip=9.9.9.9' 'exit' \
+  | MKBOX_HOSTS_FILE="$FAKE_HOSTS" "$MK" sethostbox > "$T/sethost3.out" 2>&1
+check "sethost: a conflicting existing mapping is reported, not overwritten" has "$T/sethost3.out" "pointing somewhere else"
+check "sethost: the conflicting line is still the original one"             has "$FAKE_HOSTS" "10.10.10.63	dc01.corp.local corp.local"
+check "sethost: no IP available gives a clear error" bash -c "
+  '$MK' -n sethostnoip >/dev/null 2>&1
+  printf 'sethost somedomain.local\nexit\n' | MKBOX_HOSTS_FILE='$T/fake-hosts2' '$MK' sethostnoip 2>&1 | grep -q \"isn't set\""
+rm -rf sethostbox sethostnoip
 check "ssh wrapper: start note, port intact" has smoke/notes/timeline.md "ssh: started (-p 2222 user@10.10.10.9)"
 check "ssh wrapper: end note"            has smoke/notes/timeline.md "ssh: ended (exit 0"
 check "sshpass note masks the password"  has smoke/notes/timeline.md "sshpass: started (-p *** ssh admin@10.10.10.9)"
@@ -281,8 +339,23 @@ check "proofshot: caption recorded"       has shotbox/screenshots/captions.tsv "
 check "proofshot: notes.md ticked"        has shotbox/notes/notes.md "- [x] local.txt: cafebabe"
 check "proofshot: timeline has the mark"  has shotbox/notes/timeline.md "proof: local.txt marked done (cafebabe)"
 check "proofshot: bad arg gives usage"    has "$T/proofshot.out" "usage: proofshot local|proof"
+check "proofshot: bad-arg usage clarifies the flag text is optional" has "$T/proofshot.out" "optional"
 "$MK" -r shotbox > /dev/null 2>&1
 check "timeline: proofshot command not duplicated" bash -c "! grep -q '\\\$ proofshot local' 'shotbox/report/shotbox-report.md'"
+
+# proofshot with no flag text at all still ticks the checklist - the UX fix is that this is
+# actually all that's required; nothing to copy out of the target's output first
+"$MK" -n shotbox2 10.10.10.52 > /dev/null 2>&1
+printf '%s\n' 'proofshot local' 'exit' | "$MK" shotbox2 > "$T/proofshot2.out" 2>&1
+check "proofshot with no flag text: still ticks the checklist" has shotbox2/notes/notes.md "- [x] local.txt:"
+check "proofshot with no flag text: screenshot still saved"    bash -c "compgen -G 'shotbox2/screenshots/*.png' >/dev/null"
+
+# the proof workflow hint shows up where a student would actually look for it: proofcmd's own
+# output, and the box shell's startup banner
+printf '%s\n' 'proofcmd' 'exit' | "$MK" shotbox2 > "$T/proofcmd.out" 2>&1
+check "proofcmd: ends with the proofshot next-step hint" has "$T/proofcmd.out" "proofshot local|proof"
+printf 'exit\n' | "$MK" shotbox2 > "$T/banner.out" 2>&1
+check "startup banner: shows the one-line proof workflow" has "$T/banner.out" "screenshot it (clipboard) -> proofshot local|proof"
 
 # --- addvuln ------------------------------------------------------------------------------------
 echo "addvuln"
@@ -360,6 +433,25 @@ check "assemble: no outfile given gives usage"     bash -c "'$MK' -a 2>&1 | grep
 check "assemble: no boxes given gives usage"       bash -c "'$MK' -a '$T/x.md' 2>&1 | grep -q 'usage: mkbox -a'"
 check "assemble: unknown box errors out"           bash -c "! '$MK' -a '$T/x.md' not-a-real-box 2>/dev/null"
 
+# readiness check: smoke/ad-dc/ad-file/unfilled all have zero screenshots, so every one of them
+# should get a "no screenshots recorded" note; only smoke has real findings (ad-dc/ad-file have
+# none, unfilled's one addvuln entry still counts as a findings file even though it's unfilled)
+check "assemble: readiness heading present"            has "$T/assemble.out" "Readiness check"
+check "assemble: readiness flags smoke for no screenshots" has "$T/assemble.out" "smoke: no screenshots recorded"
+check "assemble: readiness flags ad-dc for no findings"    has "$T/assemble.out" "ad-dc: no findings recorded"
+check "assemble: readiness flags ad-file for no findings"  has "$T/assemble.out" "ad-file: no findings recorded"
+check "assemble: readiness does not flag smoke for findings (it has some)" bash -c "! grep -q 'smoke: no findings' '$T/assemble.out'"
+check "assemble: readiness does not flag unfilled for findings (file exists)" bash -c "! grep -q 'unfilled: no findings' '$T/assemble.out'"
+
+# screenshot path fix: give shotbox a recorded screenshot (already created by the proofshot checks
+# above), assemble it alone, and confirm its image reference becomes an absolute path pointing at
+# shotbox's own screenshots/ dir rather than the broken "../screenshots/..." relative one
+"$MK" -a "$T/assembled-shot.md" shotbox > "$T/assemble-shot.out" 2>&1
+check "assemble: readiness does not flag shotbox for no screenshots" bash -c "! grep -q 'shotbox: no screenshots' '$T/assemble-shot.out'"
+check "assemble: screenshot path rewritten to an absolute path" bash -c "
+  grep -oE '\]\([^)]*screenshots/[^)]*\)' '$T/assembled-shot.md' | head -1 | grep -q \"\$(cd shotbox && pwd)/screenshots\""
+check "assemble: screenshot path no longer relative"            bash -c "! grep -q '](\.\./screenshots/' '$T/assembled-shot.md'"
+
 if command -v pandoc >/dev/null 2>&1; then
   TPL="$T/fake-template.odt"
   REALPYTHON3="$(PATH="${PATH#*:}" command -v python3)"   # python3 itself is stubbed above; skip past it
@@ -382,6 +474,8 @@ with zipfile.ZipFile('$TPL', 'w') as z:
     grep -q 'text:style-name=\"Heading1\"' content.xml"
   check "assemble --odt: proof checklist is plain text, not a checkbox glyph" bash -c "
     cd '$T/odtcheck' && grep -q '\[x\] local.txt' content.xml"
+  check "assemble --odt: no --osid given means no OSID line on the cover page" bash -c "
+    ! grep -q 'OSID:' '$T/odtcheck/content.xml'"
   check "assemble --odt: a custom template without MkboxPageBreak still gets one patched in" bash -c "
     cd '$T' && rm -rf odtcheck2 && mkdir odtcheck2 && cd odtcheck2 && unzip -o -q ../assembled2.odt styles.xml
     grep -q 'style:name=\"MkboxPageBreak\"' styles.xml"
@@ -390,11 +484,12 @@ with zipfile.ZipFile('$TPL', 'w') as z:
 
   # with no --odt=path and no \$MKBOX_ODT_TEMPLATE, mkbox now falls back to its own bundled
   # templates/mkbox-default.odt instead of erroring out - this is the main point of this round
-  PATH="$REALPY_DIR:$PATH" "$MK" -a "$T/assembled3.md" --odt --author="Jane Q. Tester" smoke > "$T/assemble3.out" 2>&1
+  PATH="$REALPY_DIR:$PATH" "$MK" -a "$T/assembled3.md" --odt --author="Jane Q. Tester" --osid=OS12345 smoke > "$T/assemble3.out" 2>&1
   check "assemble --odt, no template: uses the bundled default instead of erroring" bash -c "[ -s '$T/assembled3.odt' ]"
   check "assemble --odt, no template: says so"                                     has "$T/assemble3.out" "bundled template"
   rm -rf "$T/odtcheck3" && mkdir "$T/odtcheck3" && (cd "$T/odtcheck3" && unzip -o -q ../assembled3.odt)
   check "assemble --odt (default template): cover page has the author"    has "$T/odtcheck3/content.xml" "Jane Q. Tester"
+  check "assemble --odt (default template): cover page has the OSID"      has "$T/odtcheck3/content.xml" "OSID: OS12345"
   check "assemble --odt (default template): cover page has today's date" has "$T/odtcheck3/content.xml" "$(date '+%Y-%m-%d')"
   check "assemble --odt (default template): a real TOC field is present" has "$T/odtcheck3/content.xml" "text:table-of-content"
   check "assemble --odt (default template): forced page breaks present" bash -c "grep -c 'MkboxPageBreak' '$T/odtcheck3/content.xml' | grep -qv '^0$'"
@@ -404,6 +499,37 @@ with zipfile.ZipFile('$TPL', 'w') as z:
   check "assemble: Tools Used section present"           has "$T/assembled3.md" "## Tools Used"
   check "assemble: Tools Used section names mkbox itself" has "$T/assembled3.md" "\`mkbox\` v$MKBOX_VER"
   check "assemble: Tools Used links the repo"             has "$T/assembled3.md" "github.com/cherneydh/mkbox"
+
+  # --pdf: only exercised when this machine actually has a uno-capable python and soffice (same as
+  # a student's exam VM normally would, since LibreOffice ships both); --pdf degrades gracefully
+  # without them (checked separately below), so there's nothing to skip here either way.
+  if PATH="$REALPY_DIR:$PATH" command -v soffice >/dev/null 2>&1 && \
+     PATH="$REALPY_DIR:$PATH" python3 -c 'import uno' >/dev/null 2>&1; then
+    PATH="$REALPY_DIR:$PATH" "$MK" -a "$T/assembled4.md" --pdf --author="PDF Tester" smoke > "$T/assemble4.out" 2>&1
+    check "assemble --pdf: PDF file produced"        bash -c "[ -s '$T/assembled4.pdf' ]"
+    check "assemble --pdf: ODT file also produced"   bash -c "[ -s '$T/assembled4.odt' ]"
+    check "assemble --pdf: confirms the PDF path"    has "$T/assemble4.out" "PDF draft:"
+    if command -v pdftotext >/dev/null 2>&1; then
+      pdftotext "$T/assembled4.pdf" "$T/assembled4.pdf.txt" 2>/dev/null
+      check "assemble --pdf: TOC has a real, non-zero page number, not a placeholder" bash -c "
+        grep -A1 'Table of Contents' '$T/assembled4.pdf.txt' | grep -Eq '\.{3,}[[:space:]]*[1-9][0-9]*[[:space:]]*\$|[1-9][0-9]*\$'"
+    fi
+  else
+    echo "  skip  --pdf checks (no uno-capable python3 and/or soffice on this machine)"
+  fi
+  # --pdf without a working soffice still has to degrade to "the ODT is fine, here's how to finish
+  # it by hand" instead of failing outright. $T/bin is first on PATH (set at the top of this
+  # script), so a do-nothing stub placed there shadows the real soffice found later on PATH -
+  # modeling "soffice is present but can't actually serve a UNO connection" (a locked-down exam VM,
+  # a half-broken install, etc.), which is the same degrade path as soffice being entirely missing.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/soffice"
+  chmod +x "$T/bin/soffice"
+  "$MK" -a "$T/assembled5.md" --pdf smoke > "$T/assemble5.out" 2>&1
+  rm -f "$T/bin/soffice"
+  check "assemble --pdf, broken soffice: still produces the ODT"      bash -c "[ -s '$T/assembled5.odt' ]"
+  check "assemble --pdf, broken soffice: degrades instead of failing" has "$T/assemble5.out" "ODT draft:"
+  check "assemble --pdf, broken soffice: explains why there's no PDF" bash -c "grep -q 'LibreOffice' '$T/assemble5.out'"
+  check "assemble --pdf, broken soffice: no PDF file left behind"     bash -c "[ ! -e '$T/assembled5.pdf' ]"
 
   # a template that already carries its own MkboxPageBreak (mkbox's own bundled one) shouldn't be
   # rewritten by fix_odt_heading_styles just to re-add a style that's already there
@@ -415,6 +541,37 @@ else
   echo "  skip  --odt checks (pandoc not installed)"
 fi
 
+# --- in-shell "boxes" / "assemble" helpers -------------------------------------------------------
+# The whole point of these two is "don't make the student leave a box's shell, retype every box
+# name, and re-remember every flag just to update the combined report" - exercise them exactly as
+# a student would: from inside one box's interactive shell, by name alone.
+echo "in-shell boxes/assemble helpers"
+printf '%s\n' 'boxes' 'exit' | "$MK" smoke > "$T/shellboxes.out" 2>&1
+check "boxes: lists this box"             has "$T/shellboxes.out" "smoke"
+check "boxes: lists a sibling box too"    has "$T/shellboxes.out" "ad-dc"
+check "boxes: same table mkbox -l prints" has "$T/shellboxes.out" "BOX"
+
+printf '%s\n' 'assemble' 'exit' | "$MK" smoke > "$T/shellassemble1.out" 2>&1
+check "assemble (in-shell): names every sibling box, not just this one" bash -c "
+  grep -q 'Assembling' '$T/shellassemble1.out' &&
+  grep -q 'smoke'   '$T/shellassemble1.out' &&
+  grep -q 'ad-dc'   '$T/shellassemble1.out' &&
+  grep -q 'shotbox' '$T/shellassemble1.out'"
+check "assemble (in-shell): writes report.md next to the boxes, not inside one" bash -c "[ -s '$T/my labs/report.md' ]"
+check "assemble (in-shell): defaults to the fullest output (--pdf) with zero flags typed" has "$T/shellassemble1.out" "ODT draft:"
+rm -f "$T/my labs/report.md" "$T/my labs/report.odt" "$T/my labs/report.pdf" "$T/my labs/.mkbox-assemble.conf"
+
+# explicit flags, once, should be remembered - a later bare "assemble" repeats them without being
+# told again, rather than silently reverting to the --pdf default
+printf '%s\n' 'assemble --odt' 'exit' | "$MK" smoke > "$T/shellassemble2.out" 2>&1
+check "assemble (in-shell): explicit --odt honored"               bash -c "[ -s '$T/my labs/report.odt' ]"
+check "assemble (in-shell): --odt alone doesn't also produce a PDF" bash -c "[ ! -e '$T/my labs/report.pdf' ]"
+rm -f "$T/my labs/report.md" "$T/my labs/report.odt"
+printf '%s\n' 'assemble' 'exit' | "$MK" smoke > "$T/shellassemble3.out" 2>&1
+check "assemble (in-shell): remembers last call's flags on a later bare call" bash -c "
+  [ -s '$T/my labs/report.odt' ] && [ ! -e '$T/my labs/report.pdf' ]"
+rm -f "$T/my labs/report.md" "$T/my labs/report.odt" "$T/my labs/report.pdf" "$T/my labs/.mkbox-assemble.conf"
+
 # --- re-entering vs typos -----------------------------------------------------------------------
 echo "new vs existing"
 printf 'exit\n' | "$MK" smoke > "$T/e1.out" 2>&1
@@ -423,6 +580,15 @@ check "existing box: re-entering"        has "$T/e1.out" "re-entering 'smoke'"
 check "typo: says creating new box"      has "$T/e2.out" "creating new box 'smok'"
 check "typo: hints about setip"          has "$T/e2.out" "setip"
 check "new box via shell: Happy Hacking" has "$T/e2.out" "Happy Hacking :)"
+# "smok" is one char short of the existing "smoke" box - the closest-sibling-box check should
+# flag it, by name, without blocking creation (the box still gets made either way)
+check "typo: flags the close existing box by name"  has "$T/e2.out" "close to the existing box 'smoke'"
+check "typo: still creates the box anyway"           bash -c "[ -d smok ]"
+"$MK" -n unrelated-short-name 10.10.10.60 > "$T/noflag.out" 2>&1
+check "no false positive: short, unrelated box name isn't flagged" bash -c "! grep -q 'close to the existing box' '$T/noflag.out'"
+"$MK" -n ad-dcx 10.5.5.31 > "$T/addc.out" 2>&1
+check "typo: one-char-off AD box name flagged too" has "$T/addc.out" "close to the existing box 'ad-dc'"
+rm -rf smok unrelated-short-name ad-dcx
 check "re-entering: no greeting"         bash -c "! grep -q 'Happy Hacking' '$T/e1.out'"
 
 echo

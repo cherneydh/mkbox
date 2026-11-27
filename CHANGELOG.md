@@ -1,5 +1,124 @@
 # Changelog
 
+## 1.4.5
+
+A second UX audit pass, this time driven by specific ideas rather than a general review: remembering
+and retyping IPs by hand, a typo quietly forking your notes into a second box, a recorded credential
+that's still a copy-paste away from being useful, no quick way to get a target's hostname into
+`/etc/hosts`, and no way to put your OSID on the cover page without hand-editing the draft.
+
+### Added
+
+- **`$TARGET` / `$LOCAL`**: friendlier aliases for `$IP` / `$LHOST`, usable straight in a command
+  (`nmap -p- $TARGET`, a payload callback to `$LOCAL`) without retyping or remembering the actual
+  address. Both track their counterpart automatically - through `setip`, a VPN reconnect, and across
+  tabs - so there's never a stale one sitting around; `boxinfo` and the shell's startup banner both
+  advertise them.
+- **A "did you mean?" check on new box names.** A typo like `mkbox dc01` when you meant `dc-01`
+  used to just quietly start a second, empty box - and whatever you did from there forked into the
+  wrong directory until you noticed two box dirs side by side. Creating a box whose name is a close
+  (edit-distance <=2) match to an existing sibling now names that existing box right in the same
+  message. This never blocks - the typo'd name still gets created either way - it just makes the
+  mistake visible before real work goes into the wrong place.
+- **`creds [N]`**: lists what `addcred` has recorded, and `creds N` prints ready-to-paste
+  `smbclient`/`crackmapexec`/`evil-winrm`/`xfreerdp`/`sshpass`/`ftp` commands for that credential
+  against `$TARGET` - the same copy-paste gap `proofshot` already closed for flag text, now closed
+  for passwords too.
+- **`sethost domain [domain2 ...] [--ip=x.x.x.x]`**: adds an `/etc/hosts` line for an AD box that
+  only answers to its hostname, defaulting the IP to `$TARGET`. Idempotent (re-adding the same
+  mapping is a no-op), and never silently overwrites a conflicting existing entry - it prints the
+  existing line and leaves it alone instead of guessing which one you actually want.
+- **`mkbox -a --osid=OS12345`** (and `assemble --osid=...`, same flag): puts your OSID on the ODT/PDF
+  cover page, right under the title - OffSec expects it somewhere in the report, and this is one
+  fewer thing to add by hand after the fact. Optional, independent of `--author`, and also settable
+  once via `$MKBOX_OSID` the same way `--author`/`$MKBOX_AUTHOR` already work.
+
+### Internal
+
+- `sethost` writes through an overridable `MKBOX_HOSTS_FILE` (defaulting to the real `/etc/hosts`) so
+  it can be exercised in tests without ever touching the machine the test suite runs on.
+- tests/smoke.sh: 25 new checks covering all of the above (245/245 passing).
+
+## 1.4.4
+
+A direct UX pass, prompted by a specific complaint: v1.4.3 made `mkbox -a` more capable (`--pdf`,
+readiness checks) but doing any of it still meant leaving every box's shell, retyping every box
+name by hand, and retyping the same flags every time you wanted an updated draft. That's exactly
+the kind of friction that gets a feature used less often, so the report ends up thinner than it
+should be. Fixed directly, not with a wizard or extra prompts (an exam machine is the wrong place
+for anything that can block waiting on input you forgot you'd need to supply):
+
+### Added
+
+- **`assemble`**, run from inside *any* box's own shell: rebuilds the whole report - `report.md`,
+  and `.odt`/`.pdf` too if you want them - from every box sitting next to this one, with no outfile,
+  no box list, and (after the first time) no flags to type. It finds sibling boxes the same way
+  `mkbox -l` already does (a `box.env` in each sibling directory), writes the result next to the
+  boxes rather than inside whichever one you happened to be in, defaults to `--pdf` when you've
+  never told it otherwise (the most complete thing it can hand you, and it degrades gracefully on
+  its own exactly like `--pdf` always has if LibreOffice isn't there), and remembers whatever flags
+  you *do* give it (in a small `.mkbox-assemble.conf` next to the boxes) so a later bare `assemble`
+  repeats them rather than reverting to that default.
+- **`boxes`**, also run from inside any box's shell: the same box list `mkbox -l` prints, without
+  leaving the shell first to go check what else is in play.
+
+### Internal
+
+- tests/smoke.sh: 9 new checks driving these two exactly as a student would - from inside a piped
+  interactive box shell, by name alone (220/220 passing).
+
+## 1.4.3
+
+Three follow-ups: an `--odt` assembled draft's screenshots were silently broken, a submission could
+go out missing proof or findings with nothing saying so, a direct PDF was still a manual LibreOffice
+step away, and the `shot`/`proofshot` workflow read as more disjointed than it needs to be.
+
+### Added
+
+- **`mkbox -a --pdf`**: exports a PDF straight from the assembled draft, with the Table of Contents
+  already updated and real page numbers computed - the step `--odt` alone still left for you to do
+  by hand (Tools > Update All) in LibreOffice. Implies `--odt`; both files are written. Does this by
+  driving a throwaway, invisible LibreOffice instance over its UNO scripting interface (its own
+  `-env:UserInstallation` profile and a random port, so it never collides with an instance you
+  already have open), opening the ODT, calling `update()` on every index, resaving, then exporting
+  `writer_pdf_Export`. If `soffice` or a uno-capable `python3` aren't available (or LibreOffice
+  doesn't come up), `--pdf` degrades to exactly what `--odt` alone already did - the ODT is still
+  written, and mkbox tells you to finish it by hand - rather than failing the whole assemble.
+- **A pre-submission readiness check** in `mkbox -a`'s own output: for each box with zero recorded
+  screenshots and/or zero `addvuln` findings, an informational (not `WARNING:`) line naming the box
+  and what's missing. This is separate from the existing warnings carried over from each box's own
+  `mkbox -r` (unfilled `addvuln` text, unticked proof, leaked passwords) - it's specifically about
+  what a grader expects to see for every target in the report at all, and it's fine for it to fire on
+  a box you're still mid-testing.
+- **Screenshots embedded in an assembled multi-box draft now actually resolve.** A box's own
+  `report.md` references its screenshots with a path relative to where that file lives
+  (`../screenshots/foo.png`) - correct for `mkbox -r`, but broken once that content is copied into an
+  assembled draft living in an entirely different directory. `mkbox -a` now rewrites those references
+  to each box's absolute `screenshots/` path before the content goes into the draft, so the images
+  that were already embedding fine in a per-box report now also embed fine in `--odt`/`--pdf`.
+
+### Changed
+
+- **The `shot`/`proofshot` workflow is now spelled out where you'd actually look for it.** The
+  `[flag text]` argument to `proofshot`/`markproof` was already optional - the checklist ticks and
+  the screenshot is still saved with nothing more than `proofshot local|proof` - but nothing said so
+  anywhere, so the natural-feeling but unnecessary path was to copy the flag out of the target's
+  output and paste it in as an argument on every call. `proofshot`'s and `markproof`'s own usage
+  text, `proofcmd`'s output, and the box shell's startup banner now all say plainly that the text
+  argument is only for the write-up and the screenshot alone is the proof, and `proofcmd` now ends
+  with the exact next command to run once the flag's on screen.
+
+### Internal
+
+- `_assemble_readiness_checks` originally ended with two bare `[[ cond ]] && action` statements - a
+  classic `set -e` trap: when `cond` is false (the common case), that statement's own exit status is
+  nonzero, and since nothing here is testing it (unlike an `if`/`while` condition), `set -e` aborted
+  the entire `mkbox -a` run silently, with no error message, the moment any assembled box had at
+  least one finding or one screenshot. Rewritten as plain `if`/`fi`.
+- tests/smoke.sh: 22 new checks covering the readiness check, the screenshot-path rewrite, `--pdf`
+  (both a real export when this machine has `soffice`+`uno`, and graceful degradation when it
+  doesn't), and the proofshot/proofcmd/banner wording (211/211 passing).
+
 ## 1.4.2
 
 OffSec's own reporting guidance (see the OSCP Reporting Requirements article) is explicit that no

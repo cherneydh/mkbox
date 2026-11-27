@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-VERSION="1.4.2"
+VERSION="1.4.5"
 
 # Where mkbox itself lives, so it can find its bundled templates/ (see --odt) regardless of which
 # directory it was invoked from or whether $0 is a symlink.
@@ -68,7 +68,7 @@ usage() {
 Usage: mkbox [-n|--no-shell] <boxname|path> [target-ip] [--ad]
        mkbox -c|--clean  <boxname|path>
        mkbox -r|--report [--creds] <boxname|path>
-       mkbox -a|--assemble <outfile.md> [--odt[=template.odt]] [--author="Name"] [--creds] <box1> [box2 ...]
+       mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--creds] <box1> [box2 ...]
        mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PAT|path]
        mkbox -l|--list
        mkbox -V|--version
@@ -308,6 +308,56 @@ list_boxes() {
   done
   if [[ "$found" -eq 0 ]]; then
     echo "No boxes found in $PWD"
+  fi
+}
+
+# _levenshtein <a> <b>: prints the edit distance (single-char insert/delete/substitute) between
+# two strings - the measure behind the "did you mean" check below. Plain textbook DP, two rolling
+# rows instead of a full matrix since nothing here needs the alignment itself, only its length.
+_levenshtein() {
+  local a="$1" b="$2" la lb i j cost del ins sub
+  la=${#a}; lb=${#b}
+  local -a prev=() cur=()
+  for ((j = 0; j <= lb; j++)); do prev[j]=$j; done
+  for ((i = 1; i <= la; i++)); do
+    cur[0]=$i
+    for ((j = 1; j <= lb; j++)); do
+      if [[ "${a:i-1:1}" == "${b:j-1:1}" ]]; then cost=0; else cost=1; fi
+      del=$(( prev[j] + 1 ))
+      ins=$(( cur[j-1] + 1 ))
+      sub=$(( prev[j-1] + cost ))
+      cur[j]=$del
+      (( ins < cur[j] )) && cur[j]=$ins
+      (( sub < cur[j] )) && cur[j]=$sub
+    done
+    prev=("${cur[@]}")
+  done
+  printf '%s' "${prev[lb]}"
+}
+
+# _closest_sibling_box <name> <parent_dir>: is <name> (about to become a brand-new box) suspiciously
+# close to a box that already exists next to it? A plain typo - `mkbox dc01` meant to re-enter
+# `dc-01` - doesn't error anywhere today: it just quietly starts a second, empty box, and whatever
+# you do from that point (recon, screenshots, findings) forks into the wrong directory until you
+# happen to notice two box dirs sitting side by side. This never blocks (mkbox's own name has to
+# work mid-stream, non-interactively, without risking a false positive wedging a real new box), it
+# only prints which existing box the typed name is close to, if any, so the mistake is visible
+# before you've put real work into the wrong place. Case-insensitive (Shift-key slips happen too);
+# both names need to be long enough, and the match close enough, to rule out two short, genuinely
+# different names just happening to land near each other.
+_closest_sibling_box() {
+  local name="${1,,}" parent="$2" d sib dist best="" best_dist=999
+  [[ ${#name} -ge 4 ]] || return 0
+  for d in "$parent"/*/; do
+    [[ -f "${d}box.env" ]] || continue
+    sib="$(basename -- "${d%/}")"
+    [[ "${sib,,}" == "$name" ]] && continue
+    [[ ${#sib} -ge 4 ]] || continue
+    dist="$(_levenshtein "$name" "${sib,,}")"
+    if (( dist < best_dist )); then best_dist=$dist; best="$sib"; fi
+  done
+  if [[ -n "$best" && "$best_dist" -le 2 ]]; then
+    printf '%s' "$best"
   fi
 }
 
@@ -780,6 +830,18 @@ PYEOF
 # a leaked password) isn't silently lost just because this box is one of several being collated
 # instead of reported on its own. Matching lines are appended to the named array, prefixed with the
 # box name, for assemble_main to print once after the draft is written.
+# _assemble_fix_image_paths <box_dir>: a box's own report.md embeds its screenshots with a path
+# relative to where that report.md itself lives (report/../screenshots/foo.png), which is correct
+# for mkbox -r (pandoc, or just opening the file, resolves it from there) but wrong once that same
+# content is copied into an assembled draft living in a completely different directory - without
+# this, every screenshot in an assembled --odt/--pdf would come up broken or missing. Rewrites those
+# references to the box's absolute screenshots/ path instead, reading the report content on stdin.
+_assemble_fix_image_paths() {
+  local dir="$1" abs
+  abs="$(cd -- "$dir" 2>/dev/null && pwd)" || abs="$dir"
+  sed "s#](\.\./screenshots/#]($abs/screenshots/#g"
+}
+
 _assemble_collect_warnings() {
   local dir="$1" name="$2" with_creds="$3"
   local -n _arr="$4"
@@ -789,6 +851,114 @@ _assemble_collect_warnings() {
     [[ "$line" == WARNING:* ]] || continue
     _arr+=("$name: $line")
   done <<<"$_out"
+}
+
+# _assemble_readiness_checks <box_dir> <name> <array_name>: two submission-readiness checks that
+# aren't about anything a box's own mkbox -r would warn about (that's _assemble_collect_warnings
+# above) - they're specific to what a grader expects to see across the *whole* assembled report:
+# visual proof (a screenshot) and a written-up finding for every target that's in it at all. Either
+# can be legitimately empty this early in testing a box, so these are informational, not "WARNING:".
+_assemble_readiness_checks() {
+  local dir="$1" name="$2"
+  local -n _arr="$3"
+  local shots=0 vulns=0
+  if [[ -d "$dir/screenshots" ]]; then
+    shots="$(find "$dir/screenshots" -maxdepth 1 -type f ! -name 'captions.tsv' 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  if [[ -d "$dir/vulns" ]]; then
+    vulns="$(find "$dir/vulns" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  # if/then, not "[[ ... ]] && _arr+=(...)" - under set -e, a bare "cond && action" statement whose
+  # condition is false exits the whole script right here, since the list's own exit status is
+  # nonzero and nothing here is testing it (an if/while condition would be; this bare statement isn't).
+  if [[ "$shots" -eq 0 ]]; then
+    _arr+=("$name: no screenshots recorded (OSCP reporting expects visual proof, not just command output)")
+  fi
+  if [[ "$vulns" -eq 0 ]]; then
+    _arr+=("$name: no findings recorded (run addvuln, or confirm this target genuinely has none worth writing up)")
+  fi
+}
+
+# _assemble_export_pdf <odtfile> <pdffile>: OSCP submission wants a PDF, and a plain
+# `soffice --headless --convert-to pdf` would freeze the ODT's table-of-contents field exactly as
+# it already was - still showing no page numbers, since nothing short of actually opening the
+# document and updating its indexes computes them. This drives a throwaway, invisible LibreOffice
+# instance over its UNO scripting interface to do what a human opening the file and clicking
+# Tools > Update All, then File > Export As PDF, would do: update every index, resave the ODT with
+# real page numbers baked in, then export the PDF from that now-updated document.
+#
+# This is a nice-to-have layered on top of a --odt draft that's already useful on its own, so it
+# never hard-fails the whole assemble: any missing piece (no uno-capable python, no soffice, a
+# LibreOffice instance that never comes up, a failed export) prints manual-steps guidance and
+# returns 1; the caller still has a perfectly good ODT either way.
+_assemble_export_pdf() {
+  local odtfile="$1" pdffile="$2"
+  local py="" profile port pid rc i cand
+
+  # Prefer the system python3 - Debian/Ubuntu's libreoffice-script-provider-python package wires
+  # the uno module into it directly. Fall back to the interpreter LibreOffice ships internally,
+  # which always has uno, for installs where the system python doesn't.
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import uno' >/dev/null 2>&1; then
+    py="python3"
+  else
+    for cand in /usr/lib/libreoffice/program/python /opt/libreoffice*/program/python; do
+      if [[ -x "$cand" ]] && "$cand" -c 'import uno' >/dev/null 2>&1; then
+        py="$cand"
+        break
+      fi
+    done
+  fi
+  if [[ -z "$py" ]] || ! command -v soffice >/dev/null 2>&1; then
+    echo "mkbox: --pdf needs LibreOffice (soffice) with a python that has its 'uno' module - the ODT" >&2
+    echo "       above is still there; open it yourself, do Tools > Update All, then File > Export As PDF" >&2
+    return 1
+  fi
+
+  # A unique -env:UserInstallation profile avoids clashing with any LibreOffice already running on
+  # the student's own machine (soffice refuses a second instance under the same profile lock); a
+  # random high port avoids clashing with anything else already listening.
+  profile="$(mktemp -d "${TMPDIR:-/tmp}/mkbox-lo-profile.XXXXXX")" || {
+    echo "mkbox: --pdf: couldn't create a scratch LibreOffice profile - the ODT above is still there" >&2
+    return 1
+  }
+  port=$(( (RANDOM % 10000) + 20000 ))
+  soffice --headless --invisible --nocrashreport --nodefault --nofirststartwizard --norestore \
+    "-env:UserInstallation=file://$profile" \
+    "--accept=socket,host=localhost,port=$port;urp;" \
+    >/dev/null 2>&1 &
+  pid=$!
+
+  # Poll for the socket instead of a blind sleep - LibreOffice's startup time varies a lot - but
+  # give up early if the process has already died instead of waiting out the full timeout.
+  for ((i = 0; i < 100; i++)); do
+    if (exec 3<>"/dev/tcp/localhost/$port") 2>/dev/null; then
+      exec 3>&- 3<&-
+      break
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.2
+  done
+
+  rc=0
+  if (exec 3<>"/dev/tcp/localhost/$port") 2>/dev/null; then
+    exec 3>&- 3<&-
+    "$py" "$MKBOX_SCRIPT_DIR/lib/mkbox-update-toc.py" "$port" "$odtfile" "$pdffile" 2>/dev/null || rc=1
+  else
+    rc=1
+  fi
+
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$profile" 2>/dev/null || true
+
+  if [[ "$rc" -ne 0 ]]; then
+    echo "mkbox: --pdf: couldn't drive LibreOffice to export a PDF - the ODT above is still there;" >&2
+    echo "       open it yourself, do Tools > Update All, then File > Export As PDF" >&2
+    return 1
+  fi
+  return 0
 }
 
 # assemble_main <with_creds 0|1> <odt 0|1> <odt_template|""> <outfile.md> <box...>: regenerates each
@@ -806,15 +976,15 @@ _assemble_collect_warnings() {
 # sections (no persistence or cleanup expected on exam hosts), so this doesn't generate stubs for
 # those either; check the guide yourself before adding anything like that.
 assemble_main() {
-  local with_creds="$1" odt="$2" odt_tpl="$3" author="$4"; shift 4
+  local with_creds="$1" odt="$2" odt_tpl="$3" author="$4" pdf="$5" osid="$6"; shift 6
   local outfile="${1:-}"
   if [[ -z "$outfile" ]]; then
-    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]] [--author=\"Name\"] [--creds] <box1> [box2 ...]" >&2
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--creds] <box1> [box2 ...]" >&2
     return 1
   fi
   shift
   if [[ $# -eq 0 ]]; then
-    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]] [--author=\"Name\"] [--creds] <box1> [box2 ...]" >&2
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--creds] <box1> [box2 ...]" >&2
     return 1
   fi
 
@@ -859,17 +1029,18 @@ assemble_main() {
     echo "report collator used throughout testing."
     echo
     local e d n ip i=1
-    local -a box_warnings=()
+    local -a box_warnings=() readiness_notes=()
     if [[ ${#standalone[@]} -gt 0 ]]; then
       echo "# Independent Challenges"
       echo
       for e in "${standalone[@]}"; do
         d="${e%%|*}"; n="${e#*|}"
         _assemble_collect_warnings "$d" "$n" "$with_creds" box_warnings
+        _assemble_readiness_checks "$d" "$n" readiness_notes
         ip="$(env_get "$d" IP)"
         echo "## Target #$i - ${ip:-$n}"
         echo
-        demote_headings 1 1 3 < "$d/report/$n-report.md"
+        demote_headings 1 1 3 < "$d/report/$n-report.md" | _assemble_fix_image_paths "$d"
         echo
         i=$((i + 1))
       done
@@ -888,10 +1059,11 @@ assemble_main() {
       for e in "${adset[@]}"; do
         d="${e%%|*}"; n="${e#*|}"
         _assemble_collect_warnings "$d" "$n" "$with_creds" box_warnings
+        _assemble_readiness_checks "$d" "$n" readiness_notes
         ip="$(env_get "$d" IP)"
         echo "## $n - ${ip:-unknown}"
         echo
-        demote_headings 1 1 3 < "$d/report/$n-report.md"
+        demote_headings 1 1 3 < "$d/report/$n-report.md" | _assemble_fix_image_paths "$d"
         echo
       done
     fi
@@ -901,6 +1073,10 @@ assemble_main() {
   if [[ ${#box_warnings[@]} -gt 0 ]]; then
     echo "Carried over from each box's own report - fix these before this goes in your report:"
     printf '  %s\n' "${box_warnings[@]}"
+  fi
+  if [[ ${#readiness_notes[@]} -gt 0 ]]; then
+    echo "Readiness check - not necessarily wrong, but worth a second look before you submit:"
+    printf '  %s\n' "${readiness_notes[@]}"
   fi
 
   if [[ "$odt" -eq 1 ]]; then
@@ -935,6 +1111,7 @@ assemble_main() {
     {
       echo "---"
       echo "title: \"OSCP Exam Report\""
+      [[ -n "$osid" ]] && printf 'subtitle: "OSID: %s"\n' "${osid//\"/\\\"}"
       [[ -n "$author" ]] && printf 'author: "%s"\n' "${author//\"/\\\"}"
       echo "date: \"$(date '+%Y-%m-%d')\""
       echo "---"
@@ -966,7 +1143,19 @@ assemble_main() {
     if pandoc "$odtsrc" -f markdown-task_lists --reference-doc="$tpl" -o "$odtfile"; then
       rm -f "$odtsrc"
       fix_odt_heading_styles "$odtfile" "$tpl"
-      if [[ "$using_default" -eq 1 ]]; then
+      local pdf_done=0
+      if [[ "$pdf" -eq 1 ]]; then
+        local pdffile="${outfile%.md}.pdf"
+        if _assemble_export_pdf "$odtfile" "$pdffile"; then
+          pdf_done=1
+        fi
+      fi
+      if [[ "$pdf_done" -eq 1 ]]; then
+        echo "ODT draft:       $odtfile"
+        echo "PDF draft:       $pdffile  (table of contents already updated and page numbers computed -"
+        echo "                 LibreOffice did that step for you; still worth a final read-through before"
+        echo "                 you submit it)"
+      elif [[ "$using_default" -eq 1 ]]; then
         echo "ODT draft:       $odtfile  (cover page, numbered headings and page numbers from mkbox's own"
         echo "                 bundled template; open it and do Tools > Update All once so the Table of"
         echo "                 Contents - whose structure is there, but not its page numbers yet - fills in)"
@@ -1170,7 +1359,9 @@ WITH_CREDS=0
 AD_FLAG=0
 ODT=0
 ODT_TEMPLATE=""
+PDF=0
 AUTHOR=""
+OSID=""
 POSITIONAL=()
 # Flags and the box name/IP can come in any order (mkbox lame -n, mkbox -n lame, ...); only the
 # first two non-flag args are ever used (box name, then IP), so this doesn't need getopt-style
@@ -1189,7 +1380,9 @@ while [[ $# -gt 0 ]]; do
     --ad)           AD_FLAG=1 ;;
     --odt)          ODT=1 ;;
     --odt=*)        ODT=1; ODT_TEMPLATE="${1#--odt=}" ;;
+    --pdf)          ODT=1; PDF=1 ;;
     --author=*)     AUTHOR="${1#--author=}" ;;
+    --osid=*)       OSID="${1#--osid=}" ;;
     -h|--help)      usage 0 ;;
     --)             shift; POSITIONAL+=("$@"); break ;;
     -*)             echo "mkbox: unknown option $1" >&2; usage 1 ;;
@@ -1205,7 +1398,7 @@ if [[ "$MODE" == "list" ]]; then
 fi
 
 if [[ "$MODE" == "assemble" ]]; then
-  assemble_main "$WITH_CREDS" "$ODT" "$ODT_TEMPLATE" "${AUTHOR:-${MKBOX_AUTHOR:-}}" "$@"
+  assemble_main "$WITH_CREDS" "$ODT" "$ODT_TEMPLATE" "${AUTHOR:-${MKBOX_AUTHOR:-}}" "$PDF" "${OSID:-${MKBOX_OSID:-}}" "$@"
   exit $?
 fi
 
@@ -1243,6 +1436,8 @@ fi
 
 # New box or an existing one? (so a typo like `mkbox lmae` says it is creating something new)
 if [[ -f "$BOX_DIR/box.env" ]]; then BOX_STATE=existing; else BOX_STATE=new; fi
+NEARBY_BOX=""
+[[ "$BOX_STATE" == new ]] && NEARBY_BOX="$(_closest_sibling_box "$NAME" "$(dirname -- "$BOX_DIR")")"
 if [[ ! -d "$BOX_DIR" ]]; then
   mkdir -p "$BOX_DIR"
   chmod 700 "$BOX_DIR" 2>/dev/null || true      # private by default: the logs hold everything you type
@@ -1310,6 +1505,7 @@ cat > "$RC_TMP" <<'EOF'
 # Sourced by the mkbox shell
 [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 . "$BOX_DIR/box.env"
+TARGET="${IP:-}"; export TARGET                              # friendlier alias for $IP - same value, easier to remember mid-command
 
 # Per-box history with timestamps, written after every command
 export HISTFILE="$BOX_DIR/.bash_history_$BOX"
@@ -1327,10 +1523,12 @@ _BOXENV_SEEN=""
 _boxsync() {
   local m
   LHOST="$(_lhost)"; export LHOST                           # our own VPN address; follows a VPN reconnect
+  LOCAL="$LHOST"; export LOCAL                               # friendlier alias for $LHOST
   [ -r "$BOX_DIR/box.env" ] || return 0
   m="$(date -r "$BOX_DIR/box.env" '+%s.%N' 2>/dev/null || true)"
   [ "$m" != "$_BOXENV_SEEN" ] || return 0
   . "$BOX_DIR/box.env"
+  TARGET="${IP:-}"; export TARGET                            # keep in sync with $IP picked up above
   _BOXENV_SEEN="$m"
   return 0
 }
@@ -1397,8 +1595,8 @@ pad() {                                                                         
 }
 boxinfo() {                                                                                  # status overview
   echo "Box:    $BOX"
-  echo "Target: ${IP:-<unset>}"
-  echo "Local:  ${LHOST:-<no tun0/tap0>}"
+  echo "Target: ${IP:-<unset>}  (also \$TARGET)"
+  echo "Local:  ${LHOST:-<no tun0/tap0>}  (also \$LOCAL)"
   echo "Dir:    $BOX_DIR"
   [ -n "${PORTS:-}" ] && echo "Ports:  $PORTS"
   [ -n "${UDP_PORTS:-}" ] && echo "UDP:    $UDP_PORTS"
@@ -1432,10 +1630,57 @@ setip() {                                                                       
   fi
   _boxsync
   IP="$1"; export IP
+  TARGET="$IP"; export TARGET
   _saveenv                                                 # other tabs pick this up at their next prompt
   sed -i "s|^- \\*\\*Target:\\*\\* .*|- **Target:** $IP|" "$BOX_DIR/notes/notes.md"   # keep the notes header in sync
   note "target IP set to $IP"
   echo "IP=$IP"
+}
+sethost() {                                                                                  # sethost domain [domain2 ...] [--ip=x.x.x.x]  -  adds an /etc/hosts line (ip defaults to $TARGET), for an AD box that only answers to its hostname
+  local ip="$IP" hosts="${MKBOX_HOSTS_FILE:-/etc/hosts}"       # MKBOX_HOSTS_FILE is a test-only escape hatch - never set it yourself
+  local -a doms=() to_add=()
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --ip=*) ip="${a#--ip=}" ;;
+      *) doms+=("$a") ;;
+    esac
+  done
+  if [ ${#doms[@]} -eq 0 ]; then
+    echo "usage: sethost domain [domain2 ...] [--ip=x.x.x.x]   (ip defaults to \$TARGET/\$IP)"
+    return 1
+  fi
+  if [ -z "$ip" ]; then
+    echo "sethost: no IP given and \$TARGET/\$IP isn't set - run setip <ip> first, or add --ip=x.x.x.x"
+    return 1
+  fi
+  local d esc line conflict=0
+  for d in "${doms[@]}"; do
+    esc="${d//./\\.}"
+    line="$(grep -iE "(^|[[:space:]])${esc}([[:space:]]|\$)" "$hosts" 2>/dev/null | grep -v '^[[:space:]]*#' || true)"
+    if [ -z "$line" ]; then
+      to_add+=("$d")
+    elif printf '%s\n' "$line" | grep -q "^$ip[[:space:]]"; then
+      echo "sethost: '$d' -> $ip is already in $hosts"
+    else
+      echo "sethost: '$d' is already in $hosts pointing somewhere else - leaving it; edit it yourself if that's stale:"
+      printf '%s\n' "$line" | sed 's/^/    /'
+      conflict=1
+    fi
+  done
+  if [ ${#to_add[@]} -eq 0 ]; then
+    [ "$conflict" -eq 0 ]
+    return $?
+  fi
+  if printf '%s\t%s\n' "$ip" "${to_add[*]}" | _sudo tee -a "$hosts" >/dev/null; then
+    echo "sethost: added '$ip  ${to_add[*]}' to $hosts"
+    note "added ${to_add[*]} -> $ip to /etc/hosts"
+    [ "$conflict" -eq 0 ]
+    return $?
+  else
+    echo "sethost: couldn't write /etc/hosts (needs sudo)"
+    return 1
+  fi
 }
 
 # --- recon wrappers (plain nmap with fixed flags; output goes to nmap/)
@@ -1691,6 +1936,38 @@ addcred() {                                                                     
   printf '%s  %s  (%s)\n' "$(date '+%F %T')" "$c" "${*:-no source noted}" >> "$f"
   note "cred recorded for ${c%%:*} (${*:-no source noted})"      # timeline gets the username only, never the password
 }
+creds() {                                                                                    # creds [N]  -  lists recorded creds; creds N prints ready-to-paste commands for cred #N against $TARGET
+  local f="$BOX_DIR/creds/creds.txt"
+  if [ ! -s "$f" ]; then
+    echo "creds: nothing recorded yet - run: addcred user:pass [where found]"
+    return 0
+  fi
+  if [ $# -eq 0 ]; then
+    local i=0 line
+    while IFS= read -r line; do
+      i=$((i + 1))
+      printf '%2d) %s\n' "$i" "$line"
+    done < "$f"
+    echo "Paste-ready commands for one of these, against the box you're in right now: creds <N>"
+    return 0
+  fi
+  local n="$1" line cred user pass
+  line="$(sed -n "${n}p" "$f")"
+  if [ -z "$line" ]; then
+    echo "creds: no entry #$n - run 'creds' with no args to list what's recorded"
+    return 1
+  fi
+  cred="$(printf '%s\n' "$line" | awk '{print $3}')"
+  user="${cred%%:*}"; pass="${cred#*:}"
+  echo "Cred #$n: $user : $pass   (\$TARGET below resolves to whatever box you run this in)"
+  echo
+  echo "smb:          smbclient -U '$user%$pass' //\$TARGET/C\$"
+  echo "crackmapexec: crackmapexec smb \$TARGET -u '$user' -p '$pass'"
+  echo "evil-winrm:   evil-winrm -i \$TARGET -u '$user' -p '$pass'"
+  echo "rdp:          xfreerdp /v:\$TARGET /u:'$user' /p:'$pass' +clipboard"
+  echo "ssh:          sshpass -p '$pass' ssh '$user'@\$TARGET"
+  echo "ftp:          ftp \$TARGET   (then log in as $user / $pass)"
+}
 addexploit() {                                                                               # addexploit <file in exploits/> <source url> [what you changed]
   [ $# -ge 2 ] || { echo 'usage: addexploit <file-in-exploits/> <source-url> [what you changed]'; return 1; }
   local file="$1" src="$2" f="$BOX_DIR/exploits/SOURCES.md"; shift 2
@@ -1733,7 +2010,9 @@ markproof() {                                                                   
   case "${1:-}" in
     local|user) which=local ;;
     proof|root) which=proof ;;
-    *) echo "usage: markproof local|proof [value]    (markproof -u local|proof to untick)"; return 1 ;;
+    *) echo "usage: markproof local|proof [value]    ([value] is optional - just text for the write-up,"
+       echo "       e.g. the flag itself; the checklist still ticks with none given)  (-u to untick)"
+       return 1 ;;
   esac
   shift
   val="$*"; val="${val//$'\n'/ }"
@@ -1759,12 +2038,17 @@ markproof() {                                                                   
     echo "$which.txt ticked${val:+ ($val)}"
   fi
 }
-proofshot() {                                                                                # proofshot local|proof [flag value]  -  shot + markproof in one step
+proofshot() {                                                                                # proofshot local|proof [flag text]  -  shot + markproof in one step
   local which="${1:-}"
   case "$which" in
     local|user) which=local ;;
     proof|root) which=proof ;;
-    *) echo "usage: proofshot local|proof [flag value]   (run proofcmd first to see what must be in the shot)"; return 1 ;;
+    *) echo "usage: proofshot local|proof [flag text]"
+       echo "       1. run 'proofcmd' for what to paste on the target, and paste it there"
+       echo "       2. once the flag/whoami/hostname is on screen, screenshot it (clipboard)"
+       echo "       3. back here: proofshot local|proof   - that's the whole thing; [flag text] is"
+       echo "          optional and only feeds the write-up, the screenshot itself is the proof"
+       return 1 ;;
   esac
   shift
   shot "${which}.txt proof${*:+ ($*)}" || return 1
@@ -1781,19 +2065,60 @@ Windows (cmd.exe - & runs the rest even if the first command fails):
 
 Windows (PowerShell - works on every version; && is PS7+ only, so this uses ; instead):
   Get-Content "C:\Users\Administrator\Desktop\proof.txt","C:\Users\Administrator\Desktop\flag.txt" -ErrorAction SilentlyContinue; whoami; hostname; ipconfig
+
+Once that's visible on screen: screenshot it (clipboard), then back here just run:
+  proofshot local|proof
+(no need to copy the flag text out first - that argument is optional, just for the write-up)
 P
 }
 
 # --- logs & reporting
 cleanlog() { "$MKBOX_BIN" -c "$BOX_DIR"; }                                                   # refresh the cleaned log mid-session
 report()   { "$MKBOX_BIN" -r "$@" "$BOX_DIR"; }                                              # report [--creds]
+boxes() {                                                                                    # lists every box next to this one (same table as mkbox -l) - check what else is in play without leaving this shell
+  ( cd -- "$(dirname -- "$BOX_DIR")" 2>/dev/null && "$MKBOX_BIN" -l )
+}
+assemble() {                                                                                 # assemble [mkbox -a flags] - rebuilds the WHOLE report from every box next to this one, without leaving this shell or typing out box names
+  local parent conf out line
+  parent="$(dirname -- "$BOX_DIR")"
+  conf="$parent/.mkbox-assemble.conf"
+  local -a found=() flags=()
+  local d
+  for d in "$parent"/*/; do
+    [ -f "${d}box.env" ] && found+=("$(basename -- "${d%/}")")
+  done
+  if [ ${#found[@]} -eq 0 ]; then
+    echo "assemble: no boxes with a box.env found next to this one, in $parent"
+    return 1
+  fi
+  # No flags given: reuse whatever was passed last time (saved below), so a bare "assemble" later
+  # repeats the same --pdf/--author/--creds you typed once, instead of needing them every call.
+  # Nothing saved yet either: default to --pdf, since that's the single most complete thing this
+  # can hand you and it degrades to a plain --odt (or even plainer markdown) on its own if
+  # LibreOffice isn't available - never worse than what you'd have gotten by typing nothing.
+  if [ "$#" -gt 0 ]; then
+    flags=("$@")
+    printf '%s\n' "${flags[@]}" > "$conf" 2>/dev/null
+  elif [ -f "$conf" ]; then
+    while IFS= read -r line; do flags+=("$line"); done < "$conf"
+  else
+    flags=(--pdf)
+  fi
+  out="$parent/report.md"
+  echo "Assembling ${#found[@]} box(es) into $out: ${found[*]}"
+  ( cd -- "$parent" && "$MKBOX_BIN" -a "$out" "${flags[@]}" "${found[@]}" )
+}
 
 echo "Box:    $BOX"
 LHOST="$(_lhost)"; export LHOST
-echo "Target: \$IP=${IP:-<unset>}"
-echo "Local:  \$LHOST=${LHOST:-<no tun0/tap0>}"
+LOCAL="$LHOST"; export LOCAL
+echo "Target: \$IP / \$TARGET = ${IP:-<unset>}"
+echo "Local:  \$LHOST / \$LOCAL = ${LHOST:-<no tun0/tap0>}"
 echo "Dir:    $BOX_DIR"
-echo "Helpers: note pad shot proofshot boxinfo boxcd setip setad portscan udpscan svcscan serve pivot addcred addexploit addvuln proofcmd markproof cleanlog report"
+echo "Helpers: note pad shot proofshot boxinfo boxcd setip sethost setad portscan udpscan svcscan serve pivot addcred creds addexploit addvuln proofcmd markproof cleanlog report boxes assemble"
+echo "Proof, in one line: get local.txt/proof.txt on screen -> screenshot it (clipboard) -> proofshot local|proof"
+echo "         (no need to copy the flag text first - that part of proofshot is optional, just for the write-up)"
+echo "Whole report, in one word: assemble   (rebuilds report.md/.odt/.pdf next to this box, from every box next to it too)"
 echo "Logged on connect/exit: $MKBOX_NET_CMDS"
 EOF
 # the masking program is shared with the report (see MASK_AWK above); %q makes it safe to source
@@ -1807,6 +2132,7 @@ export BOX="$NAME" BOX_DIR MKBOX_BIN MKBOX_IP_RE="$IP_RE"
 if [[ "$NO_SHELL" -eq 1 ]]; then
   if [[ "$BOX_STATE" == new ]]; then
     echo "Created $BOX_DIR"
+    [[ -n "$NEARBY_BOX" ]] && echo "mkbox: '$NAME' is new, but close to the existing box '$NEARBY_BOX' - typo? ('$NAME' was still created)"
     echo "Happy Hacking :)"
   else
     echo "Box already exists, updated: $BOX_DIR"
@@ -1822,6 +2148,7 @@ fi
 if [[ "$BOX_STATE" == new ]]; then
   echo "mkbox: creating new box '$NAME' in $(dirname -- "$BOX_DIR")${IP:+ (target $IP)}"
   [[ -n "$IP" ]] || echo "mkbox: no target IP given - set one inside the box with: setip <ip>"
+  [[ -n "$NEARBY_BOX" ]] && echo "mkbox: that's close to the existing box '$NEARBY_BOX' - typo? ('$NAME' was still created; nothing to undo if not - just 'exit' and run: mkbox $NEARBY_BOX)"
   echo "Happy Hacking :)"
 else
   echo "mkbox: re-entering '$NAME'"

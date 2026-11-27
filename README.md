@@ -13,11 +13,14 @@ A small bash utility for organizing and documenting penetration-testing practice
 - [The box shell](#the-box-shell)
 - [Shared state and multiple tabs](#shared-state-and-multiple-tabs)
 - [Helpers](#helpers)
+  - [Credentials (creds)](#credentials-creds)
+  - [Hostnames (sethost)](#hostnames-sethost)
 - [Logging connections (ssh, ftp, rdp, ...)](#logging-connections-ssh-ftp-rdp-)
 - [Logs](#logs)
 - [Reporting](#reporting)
 - [Findings (addvuln)](#findings-addvuln)
 - [Active Directory sets and assembling the final report](#active-directory-sets-and-assembling-the-final-report)
+  - [Assembling without leaving the box](#assembling-without-leaving-the-box)
 - [What it does and doesn't do](#what-it-does-and-doesnt-do)
 - [Caveats](#caveats)
 - [Development](#development)
@@ -64,7 +67,7 @@ mkbox -c|--clean  <boxname|path>
 mkbox -r|--report [--creds] <boxname|path>
 mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PATTERN|path]
 mkbox -l|--list
-mkbox -a|--assemble <outfile.md> [--odt[=template.odt]] [--author="Name"] [--creds] <box1> [box2 ...]
+mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--creds] <box1> [box2 ...]
 mkbox -V|--version
 ```
 
@@ -84,7 +87,7 @@ mkbox -V|--version
 | `mkbox -a draft.md lame dc01 dc02` | Collates several boxes' own reports into one document draft - see [below](#active-directory-sets-and-assembling-the-final-report) |
 | `mkbox -V`                 | Prints the version                                                               |
 
-If the box doesn't exist yet, `mkbox` creates it and says so (`creating new box 'lame' in ...`, followed by a `Happy Hacking :)`); if it does, it says `re-entering 'lame'`. So a typo like `mkbox lmae` announces that it is making a new box instead of quietly doing it.
+If the box doesn't exist yet, `mkbox` creates it and says so (`creating new box 'lame' in ...`, followed by a `Happy Hacking :)`); if it does, it says `re-entering 'lame'`. So a typo like `mkbox lmae` announces that it is making a new box instead of quietly doing it - and if that typo'd name is suspiciously close to a box that already exists next to it (`dc01` vs. `dc-01`, `smok` vs. `smoke`), mkbox names the existing box it's close to, right there in the same message. It still creates `lmae` either way - this never blocks you, it just makes the mistake visible before you've put real recon, screenshots or findings into the wrong directory by accident.
 
 Flags and the box name/IP can be given in any order (`mkbox lame -n 10.10.10.3` works the same as `mkbox -n lame 10.10.10.3`); only the first two non-flag arguments are used, as box name and then IP.
 
@@ -133,6 +136,7 @@ Entering a box starts a `bash` session (even if your login shell is zsh) with:
 - a per-box history file, written after every command (not just on exit)
 - `$IP`, `$PORTS` and `$UDP_PORTS` kept in sync across tabs (see below), plus `$BOX` and `$BOX_DIR`
 - `$LHOST`, your own VPN address (`tun0`, else `tap0`; empty if neither exists). It is looked up again at every prompt, so it follows a VPN reconnect, and it is what the `serve` client hints use when you don't pass `--bind`
+- `$TARGET` and `$LOCAL` - friendlier aliases for `$IP` and `$LHOST`, for typing straight into a command (`nmap -p- $TARGET`, `nc -lvnp 4444` while telling a payload to callback `$LOCAL`) without having to remember or retype the actual address. Both track their counterpart automatically, including through `setip` and across tabs, so there's never a stale one lying around
 - a `[box:name]` prefix in your prompt
 - a leading space on a command keeps it out of history (`HISTCONTROL=ignorespace`). That is the shell history only: `script` still records the command and its output in the session log, so a leading space does not keep a command out of the log or the evidence tarball
 
@@ -162,10 +166,11 @@ Available inside the box shell:
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `note "text"`               | Appends a timestamped line to `notes/timeline.md`                                                                 |
 | `shot "note"`               | Saves the image on your clipboard to `screenshots/` with a timestamp and note, and logs it to the timeline        |
-| `proofshot local\|proof [value]` | `shot` + `markproof` in one step: saves the clipboard image as proof and ticks the checklist, so you can't take the shot and forget to tick it. `user` / `root` are aliases, same as `markproof` |
+| `proofshot local\|proof [value]` | `shot` + `markproof` in one step: saves the clipboard image as proof and ticks the checklist, so you can't take the shot and forget to tick it. `[value]` is optional - just text for the write-up. `user` / `root` are aliases, same as `markproof` |
 | `boxinfo`                   | Shows target, ports, file counts, proof checklist, recent timeline                                                |
 | `boxcd [subdir]`            | `cd` to the box directory or a subfolder (`boxcd nmap`)                                                           |
-| `setip <ip>`                | Changes the target IP (after a machine revert); validates it, updates `box.env` and the notes header              |
+| `setip <ip>`                | Changes the target IP (after a machine revert); validates it, updates `box.env`, `$TARGET` and the notes header   |
+| `sethost domain [domain2 ...] [--ip=x.x.x.x]` | Adds `<ip> domain [domain2 ...]` to `/etc/hosts` (ip defaults to `$TARGET`) for an AD box that only answers to its hostname; idempotent, and never overwrites a conflicting existing entry - see [Hostnames (`sethost`)](#hostnames-sethost) |
 | `portscan`                  | Runs `nmap -p- --min-rate 2000 -T4` into `nmap/allports.*`, sets `$PORTS`                                         |
 | `udpscan [N]`               | Runs `nmap -sU -sV --top-ports N --open` (default 20) into `nmap/udp.*`, sets `$UDP_PORTS`                        |
 | `svcscan [ports]`           | Runs `nmap -sC -sV -p <ports>` into `nmap/services.*` (defaults to `$PORTS`; accepts numbers and ranges)          |
@@ -174,6 +179,7 @@ Available inside the box shell:
 | `pad [-g] [edit\|add\|cmd\|show\|grep\|path]` | Scratchpad for notes and commands that don't belong in the report - see [Scratchpad](#scratchpad) |
 | `ssh`, `ftp`, `sftp`, `smbclient`, `rdesktop`, `xfreerdp`, `nc`, `telnet`, `mysql`, ... | Logged automatically on connect/disconnect - see [Logging connections](#logging-connections-ssh-ftp-rdp-) |
 | `addcred user:pass [where]` | Appends to `creds/creds.txt`; the timeline records only the username                                              |
+| `creds [N]`                 | Lists recorded creds with an index; `creds N` prints ready-to-paste `smbclient`/`crackmapexec`/`evil-winrm`/`xfreerdp`/`sshpass`/`ftp` commands for that one, against `$TARGET` - see [Credentials (`creds`)](#credentials-creds) |
 | `addexploit <file> <source-url> [what changed]` | Records where a file in `exploits/` came from and what you modified, in `exploits/SOURCES.md`; the report shows this ahead of the plain file list - see [Reporting](#reporting) |
 | `addvuln initial\|privesc\|post <title> <critical\|high\|medium\|low>` | Opens a templated finding in `$EDITOR` (Explanation/Fix) and files it under `vulns/`, in place of an ad-hoc `note "found this: <link>"` - see [Findings](#findings-addvuln) |
 | `setad on\|off`              | Flags (or unflags) the current box as part of an Active Directory set, same as creating it with `--ad` - see [Active Directory sets](#active-directory-sets-and-assembling-the-final-report) |
@@ -181,6 +187,45 @@ Available inside the box shell:
 | `markproof local\|proof [value]` | Ticks `local.txt` / `proof.txt` in the Proof checklist of `notes/notes.md`, stores the optional value on that line, adds a timeline note. `user` / `root` are aliases; `markproof -u local` unticks (value kept) |
 | `cleanlog`                  | Rebuilds the cleaned session log mid-session                                                                      |
 | `report [--creds]`          | Same as `mkbox -r` for the current box                                                                            |
+| `boxes`                     | Lists every box next to this one (same table as `mkbox -l`) - check what else is in play without leaving this shell |
+| `assemble [mkbox -a flags]` | Rebuilds the *whole* report from every box next to this one, as `report.md`/`.odt`/`.pdf` in their shared parent directory - no need to leave this shell, list every box by name, or retype flags each time; see [Assembling without leaving the box](#assembling-without-leaving-the-box) |
+
+### Credentials (`creds`)
+
+`addcred` is write-only by design - it appends to `creds/creds.txt` and the timeline only ever gets the username. `creds` is how you read it back without opening the file:
+
+```
+$ creds
+ 1) 2026-11-27 02:08:43  administrator:Password123!  (domain admin via kerberoast)
+ 2) 2026-11-27 02:08:43  svc_sql:Sup3rS3cr3t  (smb share)
+Paste-ready commands for one of these, against the box you're in right now: creds <N>
+
+$ creds 1
+Cred #1: administrator : Password123!   ($TARGET below resolves to whatever box you run this in)
+
+smb:          smbclient -U 'administrator%Password123!' //$TARGET/C$
+crackmapexec: crackmapexec smb $TARGET -u 'administrator' -p 'Password123!'
+evil-winrm:   evil-winrm -i $TARGET -u 'administrator' -p 'Password123!'
+rdp:          xfreerdp /v:$TARGET /u:'administrator' /p:'Password123!' +clipboard
+ssh:          sshpass -p 'Password123!' ssh 'administrator'@$TARGET
+ftp:          ftp $TARGET   (then log in as administrator / Password123!)
+```
+
+`$TARGET` in that output is printed literally, not substituted - paste the line as-is and your shell fills in whichever box you're actually sitting in, so a credential found on one box still pastes correctly if you reuse it against another (`cd` to that box's shell first, or just change `$TARGET` yourself before running it).
+
+### Hostnames (`sethost`)
+
+Plenty of AD boxes only answer to their hostname (Kerberos, SMB signing, a site that redirects to its own name), so the first real step on most of them is adding an `/etc/hosts` entry by hand. `sethost` does that instead:
+
+```
+sethost dc01.corp.local corp.local
+```
+
+- **IP defaults to `$TARGET`/`$IP`** - the box you're sitting in - so there's nothing else to type; pass `--ip=x.x.x.x` to target something else instead.
+- **Several domains at once**: `sethost dc01.corp.local corp.local DC01` covers the FQDN, the bare domain, and the NetBIOS name in one line.
+- **Idempotent.** Running it again with the same mapping is a no-op - it says so and doesn't write a duplicate line.
+- **Never silently overwrites a conflicting entry.** If a domain is already in `/etc/hosts` pointing somewhere else (stale from an earlier box, say), `sethost` prints that existing line and leaves it alone rather than guessing which one you actually want; edit it yourself if it's stale.
+- Needs `sudo` to write `/etc/hosts` unless you're already root (same `_sudo` helper `portscan`/`udpscan`/`svcscan` use).
 
 ### Serving files
 
@@ -236,13 +281,20 @@ This saves the clipboard image as `screenshots/<YYYYmmdd-HHMMSS>-<note-slug>.png
 - It needs `xclip` on X11 (`sudo apt install xclip`) or `wl-clipboard` on Wayland. The clipboard must contain a PNG; anything else is rejected without saving.
 - Over plain SSH there is no desktop clipboard, so `shot` won't work there.
 
-**`proofshot local|proof [value]`** is `shot` + `markproof` in one step, for the two screenshots that matter most: once you've got `local.txt`/`proof.txt` on screen (see `proofcmd` for a one-liner that prints it alongside `whoami`/`hostname`/the IP), copy it and run:
+**`proofshot local|proof [value]`** is `shot` + `markproof` in one step, for the two screenshots that matter most. The whole workflow is three steps, and only the last one is typed into mkbox:
+
+1. Run `proofcmd` for a one-liner to paste on the target - it prints `local.txt`/`proof.txt` alongside `whoami`/`hostname`/the IP, so one screenshot covers everything a grader needs to see.
+2. Once that's on screen, take the screenshot (so it's on your clipboard) - same as for any other `shot`.
+3. Back in mkbox: `proofshot local|proof`.
+
+That's it - `[value]` is **optional**. It's only there to also record the flag text in `notes/notes.md` for your own write-up; the checklist still ticks and the screenshot still saves with nothing more than step 3 above, so there's no need to copy the flag out of the target's output first unless you want it written down:
 
 ```
-proofshot proof 0a1b2c3d4e5f
+proofshot proof 0a1b2c3d4e5f     # also records the flag text
+proofshot proof                  # same result otherwise - ticks the checklist, saves the screenshot
 ```
 
-That saves the screenshot, labels it, and ticks the Proof checklist in `notes/notes.md` with the flag value, all at once - the same thing `shot "..."` followed by `markproof proof 0a1b2c3d4e5f` would do, just without the chance of doing one and forgetting the other. `markproof -u` still works afterward if you need to untick it.
+Either way this saves the screenshot, labels it, and ticks the Proof checklist in `notes/notes.md`, all at once - the same thing `shot "..."` followed by `markproof proof [value]` would do, just without the chance of doing one and forgetting the other. `markproof -u` still works afterward if you need to untick it.
 
 ### Recon wrappers
 
@@ -414,6 +466,31 @@ mkbox -a draft.md lame dc01 dc02 filesrv03
 
 Any `WARNING:` line a box's own `mkbox -r` would have printed (an unticked Proof item, an unfilled `addvuln` entry, a password that turns up somewhere it shouldn't) is captured instead of being thrown away, and printed once under `Assembled draft:`, prefixed with the box it came from - previously these were silently lost the moment a box was rolled into `-a` instead of reported on its own.
 
+Alongside those, a **Readiness check** prints for any box with zero recorded screenshots and/or zero `addvuln` findings - informational, not a `WARNING:`, since it's entirely normal for a box you're still mid-testing to have neither yet. It's specifically there for the pass right before you submit, as a second check that nothing's missing across the whole report: a target with no proof screenshot, or no write-up at all, is easy to miss once several boxes' worth of content are all mixed into one draft.
+
+Screenshots embedded in each box's own report carry through into the assembled draft too, with their image paths automatically rewritten from relative (correct only for that box's own `mkbox -r`) to absolute (correct wherever `draft.md`/`--odt`/`--pdf` end up living) - nothing to do on your end for this to work.
+
+### Assembling without leaving the box
+
+Typing `mkbox -a draft.md --pdf --author="Jane" lame dc01 dc02 filesrv03` from a plain terminal works, but it means leaving every box's shell, remembering every box's exact name, and retyping the same flags each time you want an updated draft - tedious enough, especially mid-exam, that you're liable to just stop checking it until the very end. **`assemble`**, run from inside *any* box's own shell, does the same thing with none of that:
+
+```
+[box:lame] root@kali:~/lame# assemble
+Assembling 4 box(es) into /home/kali/labs/report.md: dc01 dc02 filesrv03 lame
+...
+ODT draft:       /home/kali/labs/report.odt
+PDF draft:       /home/kali/labs/report.pdf  (table of contents already updated and page numbers computed...)
+```
+
+No outfile, no box list, no flags required:
+
+- **Every box next to this one** (same directory `boxinfo`/`boxcd` already treat as "the labs folder") is found automatically by looking for a `box.env` in each sibling directory - the same check `mkbox -l` uses - so a box you haven't touched in days is still included without you having to remember it exists.
+- **The output always lands at `report.md`/`.odt`/`.pdf` next to the boxes**, not inside any one of them, so it's in the same place every time regardless of which box's shell you ran it from.
+- **With no flags given, it defaults to `--pdf`** - the single most complete thing it can hand you - and that degrades to `--odt`, or even just the Markdown draft, on its own if LibreOffice isn't available (same as `--pdf` always does), so a bare `assemble` is never worse than typing nothing at all.
+- **Flags you do give are remembered** (in a small `.mkbox-assemble.conf` file next to the boxes) and reused by the next bare `assemble` - so `assemble --odt --author="Jane Q. Tester"` once, and every later plain `assemble` keeps producing exactly that, until you explicitly pass something different.
+
+**`boxes`**, also run from inside any box's shell, is the same box list `mkbox -l` prints, without leaving the shell to check what else is in play first.
+
 This produces `draft.md` with:
 
 - `High-Level Summary`, `Recommendations`, and `Methodology` as `TODO` stubs - `mkbox` only knows what happened on each box, not what to say about it, so (same as everywhere else) it doesn't guess. The `Methodology` stub is a reminder to write up Information Gathering / Service Enumeration / Penetration from what you actually did; it deliberately does **not** add a Maintaining Access / House Cleaning stub, since the current OSCP Exam Guide doesn't ask for persistence or cleanup on exam hosts - check the guide yourself before adding one, in case that changes.
@@ -428,12 +505,12 @@ Pass `--creds` to include `creds/creds.txt` for every box, same as `mkbox -r --c
 **Converting to ODT.** Pass `--odt` and `mkbox -a` also produces `<outfile>.odt` - a real document, not just differently-styled Markdown:
 
 ```
-mkbox -a draft.md --odt --author="Jane Q. Tester" lame dc01 dc02 filesrv03
+mkbox -a draft.md --odt --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02 filesrv03
 ```
 
 By default (no `=path`, and `$MKBOX_ODT_TEMPLATE` unset) this uses mkbox's own bundled template (`templates/mkbox-default.odt`, shipped alongside the script), which needs nothing from you and gives you, entirely deterministically:
 
-- **A real cover page** - title, your name (`--author`, or set `$MKBOX_AUTHOR` once instead of typing it every time), and the date - on its own page.
+- **A real cover page** - title, your OSID (`--osid`, or set `$MKBOX_OSID` once - OffSec expects it somewhere on the report, this just saves retyping it), your name (`--author`, or set `$MKBOX_AUTHOR` once instead of typing it every time), and the date - on its own page. Both `--osid` and `--author` are optional and independent of each other.
 - **A real Table of Contents.** Pandoc and LibreOffice/Word build the field structure, but don't actually compute page numbers at generation time - open the ODT and do **Tools > Update > All** once (or right-click the TOC and choose **Update Index**) and it fills in correctly, exactly as it would for any other document with a TOC field. This is a one-click, completely normal step for any ODT/DOCX with a table of contents, not a sign anything is broken.
 - **Automatically numbered headings** (`1`, `1.1`, `1.1.1`, matching the Independent Challenges / Active Directory Set structure `mkbox -a` already builds), and **page numbers** in the footer - both wired up in the bundled template's styles, so there's nothing left to configure.
 
@@ -443,6 +520,16 @@ This is why the OffSec exam guide's note on reporting flexibility (any reasonabl
 - Some ODT templates (including OffSec's own) name their heading styles `Heading1`/`Heading2`/`Heading3` instead of pandoc's own `Heading 1`/`Heading 2` convention - without extra handling, `--reference-doc` would copy the style *definitions* but nothing in the generated document would actually reference them, so every heading would silently render as plain body text. `mkbox` detects this and patches the generated file to use whichever naming the template actually uses, after pandoc runs. (The bundled default template already matches pandoc's own naming, so this never triggers for it.)
 - The Proof checklist (`- [x] local.txt: ...`) is Markdown task-list syntax; converted at face value it renders as a Unicode checkbox glyph, and most ODT templates' body font (including OffSec's own) doesn't have that glyph, so it shows up as an empty box instead of a check mark. `mkbox` tells pandoc to read it as plain text instead, so it comes through as `[x] local.txt: ...` - legible, if not styled as a real checkbox.
 - This needs `pandoc` installed; if it isn't, `mkbox` says so and skips the ODT step (the Markdown draft is still produced).
+
+**Exporting straight to PDF.** OSCP submission wants a PDF anyway, and the one manual step `--odt` still leaves you - opening the file and doing Tools > Update All so the Table of Contents actually has page numbers - is exactly what `--pdf` automates:
+
+```
+mkbox -a draft.md --pdf --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02 filesrv03
+```
+
+`--pdf` implies `--odt` (so you still get both `draft.odt` and `draft.pdf`), then drives a throwaway, invisible LibreOffice instance over its own UNO scripting interface to do what you'd otherwise do by hand: open the ODT, update every index (which is what actually computes real page numbers), resave it, and export the PDF from that updated copy - so the TOC in `draft.pdf` is already correct, not frozen at "no page computed yet". It uses its own LibreOffice profile and a random port each run, so it won't conflict with a LibreOffice window you already have open.
+
+This needs `soffice` (LibreOffice itself) and a `python3` with its `uno` module available - both are already present on a normal LibreOffice install (true for Kali and most exam-VM setups by default). If either is missing, or the LibreOffice instance never comes up, `--pdf` degrades to exactly what `--odt` alone would have done: the ODT is still written, and `mkbox` tells you to finish it yourself (Tools > Update All, then File > Export As PDF) rather than failing the whole assemble over a nice-to-have.
 
 ## What it does and doesn't do
 
@@ -475,7 +562,8 @@ The whole tool is a single readable bash script (`mkbox`), so it is easy to audi
 - The password-masking rules are written in portable awk and were tested with `mawk` (Kali's default `awk`).
 - `mkbox -a` caps nested heading depth at 3 levels to match what the official exam report template itself supports; anything a box's own report would otherwise put deeper becomes a bold paragraph instead of a numbered heading. It also rewrites an unfilled `notes.md` placeholder bullet as `_(nothing recorded)_` in the assembled draft only - your live `notes.md` and each box's own standalone `mkbox -r` report are untouched.
 - `--odt` needs `pandoc` on `$PATH`, plus `python3` for the heading-style and forced-page-break patches described in [Active Directory sets and assembling the final report](#active-directory-sets-and-assembling-the-final-report); without `python3` those patches are silently skipped rather than failing, which (only when pointed at a custom, non-bundled template) can mean unstyled headings or a missing page break before the cover page / TOC.
-- The Table of Contents in a `--odt` output needs one manual step: open the file and do Tools > Update > All (or right-click it and choose Update Index) so LibreOffice/Word fills in the real page numbers. This is ordinary behavior for any document with a TOC field, not something mkbox could skip - pandoc and LibreOffice/Word don't compute final page numbers until the document is actually laid out by one of them.
+- The Table of Contents in a `--odt` output needs one manual step: open the file and do Tools > Update > All (or right-click it and choose Update Index) so LibreOffice/Word fills in the real page numbers. This is ordinary behavior for any document with a TOC field, not something mkbox could skip - pandoc and LibreOffice/Word don't compute final page numbers until the document is actually laid out by one of them. `--pdf` does this step for you, automatically, as part of exporting the PDF.
+- `--pdf` additionally needs `soffice` and a `python3` with its `uno` module - both ship with a normal LibreOffice install. Without them (or if LibreOffice fails to start in time), `--pdf` degrades to the same result as `--odt` alone: the ODT is still written, with a message telling you to finish it by hand.
 
 ## Development
 
