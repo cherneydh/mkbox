@@ -29,8 +29,10 @@ A small bash utility for organizing and documenting penetration-testing practice
 
 ```
 git clone https://github.com/cherneydh/mkbox && cd mkbox
-./install.sh            # sudo ./install.sh for system-wide; ./install.sh --check just reports dependencies
+chmod +x install.sh && ./install.sh     # sudo ./install.sh for system-wide; ./install.sh --check just reports dependencies
 ```
+
+(The `chmod +x` is only needed if your checkout dropped the executable bit, e.g. a zip download; `bash install.sh` works the same. The installer itself sets the right modes on everything it installs.)
 
 `install.sh` puts the whole tree in `<prefix>/share/mkbox/` (the script, `lib/`, and `templates/`) and symlinks `<prefix>/bin/mkbox` to it. The prefix is `/usr/local` when you can write there (or run it with `sudo`), otherwise `~/.local` (make sure `~/.local/bin` is on your `PATH`); pass `--prefix DIR` to choose another. It checks that the installed copy is complete, then lists any missing dependencies along with the `apt` command that fixes them. `./install.sh --uninstall` removes it again.
 
