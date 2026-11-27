@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.7
+
+Separating as the first production release.
+
 ## 1.4.6
 
 Install and presentation pass: a fix for an install path that silently broke `--odt`/`--pdf`, a proper
