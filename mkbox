@@ -859,8 +859,8 @@ _assemble_collect_warnings() {
 # visual proof (a screenshot) and a written-up finding for every target that's in it at all. Either
 # can be legitimately empty this early in testing a box, so these are informational, not "WARNING:".
 _assemble_readiness_checks() {
-  local dir='$1' name='$2'
-  local -n _arr='$3'
+  local dir="$1" name="$2"
+  local -n _arr="$3"
   local shots=0 vulns=0
   if [[ -d "$dir/screenshots" ]]; then
     shots="$(find "$dir/screenshots" -maxdepth 1 -type f ! -name 'captions.tsv' 2>/dev/null | wc -l | tr -d ' ')"
