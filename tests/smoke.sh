@@ -494,8 +494,10 @@ with zipfile.ZipFile('$TPL', 'w') as z:
   check "assemble --odt (default template): cover page has today's date" has "$T/odtcheck3/content.xml" "$(date '+%Y-%m-%d')"
   check "assemble --odt (default template): a real TOC field is present" has "$T/odtcheck3/content.xml" "text:table-of-content"
   check "assemble --odt (default template): forced page breaks present" bash -c "grep -c 'MkboxPageBreak' '$T/odtcheck3/content.xml' | grep -qv '^0$'"
+  # layout/attribute-order independent: pandoc versions differ in how they re-serialize styles.xml
   check "assemble --odt (default template): decimal outline numbering"  bash -c "
-    grep -A2 'text:outline-level-style text:level=\"1\"' '$T/odtcheck3/styles.xml' | grep -q 'style:num-format=\"1\"'"
+    tr '\n' ' ' < '$T/odtcheck3/styles.xml' |
+      grep -Eq '<text:outline-level-style[^>]*(text:level=\"1\"[^>]*style:num-format=\"1\"|style:num-format=\"1\"[^>]*text:level=\"1\")'"
   MKBOX_VER="$("$MK" -V | awk '{print $2}')"
   check "assemble: Tools Used section present"           has "$T/assembled3.md" "## Tools Used"
   check "assemble: Tools Used section names mkbox itself" has "$T/assembled3.md" "\`mkbox\` v$MKBOX_VER"
