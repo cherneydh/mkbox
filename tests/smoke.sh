@@ -559,6 +559,7 @@ check "assemble (in-shell): names every sibling box, not just this one" bash -c 
   grep -q 'ad-dc'   '$T/shellassemble1.out' &&
   grep -q 'shotbox' '$T/shellassemble1.out'"
 check "assemble (in-shell): writes report.md next to the boxes, not inside one" bash -c "[ -s '$T/my labs/report.md' ]"
+if command -v pandoc >/dev/null 2>&1; then
 check "assemble (in-shell): defaults to the fullest output (--pdf) with zero flags typed" has "$T/shellassemble1.out" "ODT draft:"
 rm -f "$T/my labs/report.md" "$T/my labs/report.odt" "$T/my labs/report.pdf" "$T/my labs/.mkbox-assemble.conf"
 
@@ -572,6 +573,9 @@ printf '%s\n' 'assemble' 'exit' | "$MK" smoke > "$T/shellassemble3.out" 2>&1
 check "assemble (in-shell): remembers last call's flags on a later bare call" bash -c "
   [ -s '$T/my labs/report.odt' ] && [ ! -e '$T/my labs/report.pdf' ]"
 rm -f "$T/my labs/report.md" "$T/my labs/report.odt" "$T/my labs/report.pdf" "$T/my labs/.mkbox-assemble.conf"
+else
+  echo "  skip  in-shell assemble --odt/--pdf checks (pandoc not installed)"
+fi
 
 # --- re-entering vs typos -----------------------------------------------------------------------
 echo "new vs existing"
