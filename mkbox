@@ -1067,6 +1067,10 @@ assemble_main() {
   done
 
   mkdir -p "$(dirname -- "$outfile")" 2>/dev/null || true
+  # declared before the redirected group below, so nothing in it reads $outfile's name while it is being written
+  local pdir_root; pdir_root="$(dirname -- "$outfile")"
+  local -a todo_sections=()
+  local pn pinfo phead pcanon pbody
   {
     # The title is a bold line, not a heading: the official template's own 3 defined heading levels
     # (matching its own 1 / 1.1 / 1.1.1 numbering) are needed below for Target -> per-box sections,
@@ -1075,11 +1079,8 @@ assemble_main() {
     echo
     echo "_Assembled by mkbox $VERSION on $(date '+%F %T') from $(( ${#standalone[@]} + ${#adset[@]} )) box(es). This only pulls together what's in each box - fill in the TODOs below yourself._"
     echo
-    local pdir_root; pdir_root="$(dirname -- "$outfile")"
-    local -a todo_sections=()
-    local pn pinfo pfile phead pcanon pbody
     for pn in summary recommendations methodology; do
-      pinfo="$(report_part_info "$pn")"; IFS=$'\t' read -r pfile phead pcanon <<<"$pinfo"
+      pinfo="$(report_part_info "$pn")"; IFS=$'\t' read -r _ phead pcanon <<<"$pinfo"
       echo "# $phead"
       echo
       pbody="$(report_part_body "$pdir_root" "$pcanon")"
