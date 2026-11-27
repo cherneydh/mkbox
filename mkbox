@@ -844,12 +844,12 @@ _assemble_fix_image_paths() {
 
 _assemble_collect_warnings() {
   local dir="$1" name="$2" with_creds="$3"
-  local -n _arr="$4"
+  local -n _warn_arr="$4"
   local _out line
   _out="$(make_report "$dir" "$name" "$with_creds" 2>&1)"
   while IFS= read -r line; do
     [[ "$line" == WARNING:* ]] || continue
-    _arr+=("$name: $line")
+    _warn_arr+=("$name: $line")
   done <<<"$_out"
 }
 
@@ -860,7 +860,7 @@ _assemble_collect_warnings() {
 # can be legitimately empty this early in testing a box, so these are informational, not "WARNING:".
 _assemble_readiness_checks() {
   local dir="$1" name="$2"
-  local -n _arr="$3"
+  local -n _note_arr="$3"
   local shots=0 vulns=0
   if [[ -d "$dir/screenshots" ]]; then
     shots="$(find "$dir/screenshots" -maxdepth 1 -type f ! -name 'captions.tsv' 2>/dev/null | wc -l | tr -d ' ')"
@@ -868,14 +868,14 @@ _assemble_readiness_checks() {
   if [[ -d "$dir/vulns" ]]; then
     vulns="$(find "$dir/vulns" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
   fi
-  # if/then, not "[[ ... ]] && _arr+=(...)" - under set -e, a bare "cond && action" statement whose
+  # if/then, not "[[ ... ]] && _note_arr+=(...)" - under set -e, a bare "cond && action" statement whose
   # condition is false exits the whole script right here, since the list's own exit status is
   # nonzero and nothing here is testing it (an if/while condition would be; this bare statement isn't).
   if [[ "$shots" -eq 0 ]]; then
-    _arr+=("$name: no screenshots recorded (OSCP reporting expects visual proof, not just command output)")
+    _note_arr+=("$name: no screenshots recorded (OSCP reporting expects visual proof, not just command output)")
   fi
   if [[ "$vulns" -eq 0 ]]; then
-    _arr+=("$name: no findings recorded (run addvuln, or confirm this target genuinely has none worth writing up)")
+    _note_arr+=("$name: no findings recorded (run addvuln, or confirm this target genuinely has none worth writing up)")
   fi
 }
 
