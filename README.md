@@ -76,7 +76,7 @@ mkbox -c|--clean  <boxname|path>
 mkbox -r|--report [--creds] <boxname|path>
 mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PATTERN|path]
 mkbox -l|--list
-mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--title="Text"] [--creds] <box1> [box2 ...]
+mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--title="Text"] [--final] [--creds] <box1> [box2 ...]
 mkbox -t|--text [summary|recommendations|methodology|status]
 mkbox -d|--doctor
 mkbox -V|--version
@@ -545,6 +545,14 @@ mkbox -a draft.md --pdf --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02 
 
 This needs `soffice` (LibreOffice itself) and a `python3` with its `uno` module available - both are already present on a normal LibreOffice install (true for Kali and most exam-VM setups by default). If either is missing, or the LibreOffice instance never comes up, `--pdf` degrades to exactly what `--odt` alone would have done: the ODT is still written, and `mkbox` tells you to finish it yourself (Tools > Update All, then File > Export As PDF) rather than failing the whole assemble over a nice-to-have.
 
+**A hard stop before you submit: `--final`.** `--pdf` on its own is happy to build a PDF with `TODO` stubs still in it (it only warns). Add `--final` for the real export:
+
+```
+mkbox -a draft.md --final --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02 filesrv03
+```
+
+If the High-Level Summary, Recommendations or Methodology is still unwritten, `mkbox` lists what's missing, writes the Markdown draft as usual, but **does not build the ODT/PDF** and exits non-zero. It also exits non-zero if the PDF itself couldn't be produced (no LibreOffice), instead of quietly falling back to an ODT. `--final` on its own implies `--pdf`; with `--odt` it only does the unwritten-sections check. In the box shell, `assemble --final` does the same; it is never remembered between runs, so a plain `assemble` stays a no-fuss work-in-progress rebuild.
+
 ### Writing the sections only you can write
 
 Three sections of the report can't come from your notes: the **High-Level Summary**, the **Recommendations**, and the **Methodology**. Write them without leaving the box shell:
@@ -560,7 +568,7 @@ assemble                      # pulls them in; lists whatever is still a TODO st
 Outside the shell the same thing is `mkbox --text [section]`, run from the directory your boxes (and `report.md`) live in.
 
 - **They live in `report-parts/` next to the assembled report** (`summary.md`, `recommendations.md`, `methodology.md`), not inside `report.md`, so rebuilding the report - which regenerates `report.md` from the boxes every time - never overwrites your writing.
-- **Write plain paragraphs and lists, no `#` headings** - `mkbox` adds the section heading itself. The guidance comment at the top of each new file is ignored; you can leave it or delete it. A file that's empty or still starts with `TODO` counts as unwritten.
+- **Write plain paragraphs and lists, and skip `#` headings** - `mkbox` adds the section heading itself. If you use one anyway, it is pushed down a level (`#` becomes `##`, and anything deeper than the report's third level becomes a bold line) so it can't disturb the heading numbering; `#` lines inside code fences are left alone, and `assemble` tells you when it demoted something. The guidance comment at the top of each new file is ignored; you can leave it or delete it. A file that's empty or still starts with `TODO` counts as unwritten.
 - **Every `assemble` ends with a checklist** of whatever is still unwritten, with the exact command for each, so you find out before the PDF rather than after.
 - The `Tools Used` subsection under `Methodology` is added automatically after your text.
 
@@ -607,6 +615,6 @@ shellcheck mkbox install.sh tests/smoke.sh
 bash tests/smoke.sh
 ```
 
-The `--odt` checks need `pandoc` and are skipped when it isn't installed; the `--pdf` checks additionally need LibreOffice with `uno`.
+The `--odt` checks need `pandoc` and are skipped when it isn't installed; the `--pdf` checks additionally need LibreOffice with `uno`. Set `MKBOX_REQUIRE_PDF=1` to make a missing pandoc/LibreOffice/`uno` a failure instead of a skip (CI does this, so the PDF path can't go untested unnoticed). The CI job installs `pandoc libreoffice-writer python3-uno poppler-utils` to run them.
 
 See `CHANGELOG.md` for what changed in each release.

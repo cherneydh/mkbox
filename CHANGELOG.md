@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.5.0
+
+A hardening pass on the report pipeline: a hard stop before export, and the two gaps found in final review.
+
+### Added
+
+- **`--final`** (`mkbox -a ... --final`, or `assemble --final` in the box shell): the real, submit-it
+  export. If the High-Level Summary, Recommendations or Methodology is still unwritten, `mkbox` lists
+  what's missing, still writes the Markdown draft, but **does not build the ODT/PDF** and exits non-zero
+  (plain `--pdf` only ever warned). It also fails, rather than quietly falling back to an ODT, if the PDF
+  itself can't be produced. `--final` alone implies `--pdf`; combined with `--odt` it only does the
+  unwritten-sections check. In the box shell it is never saved into the remembered `assemble` flags, so
+  a later bare `assemble` stays a no-fuss work-in-progress rebuild.
+
+### Fixed
+
+- **`#` headings in `reporttext` files disturbed the heading numbering.** The README says not to use
+  them, but nothing enforced it: a `# Foo` in `summary.md` became a second top-level heading and shifted
+  every number after it. Headings in those files are now pushed down one level (anything that would land
+  below level 3, the deepest the report template has, becomes a bold line); `#` lines inside code fences
+  are left alone; your files on disk are never rewritten; and `assemble` prints a note saying which
+  section it adjusted. The guidance comment in new section files now says so too.
+
+### Internal
+
+- **CI now exercises the PDF path.** The workflow installs `libreoffice-writer`, `python3-uno` and
+  `poppler-utils` (for the table-of-contents page-number check) alongside pandoc; before, the `--pdf`
+  checks were silently skipped there, which is how the relative-path bug fixed in 1.4.7 went unnoticed.
+  CI also sets `MKBOX_REQUIRE_PDF=1`, which turns "pandoc / LibreOffice / uno / pdftotext not available"
+  from a skip into a failure, so that can't happen unnoticed again. Run locally without it and the
+  checks still skip as before.
+- `VERSION` is 1.5.0. tests/smoke.sh: 24 new checks (298/298 passing, including the `--pdf` and
+  `--final` export checks, which only run where LibreOffice and its `uno` module are installed).
+
 ## 1.4.7
 
 The first production release.

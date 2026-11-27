@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-VERSION="1.4.7"
+VERSION="1.5.0"
 
 # Where mkbox itself lives, so it can find its bundled templates/ (see --odt) regardless of which
 # directory it was invoked from or whether $0 is a symlink.
@@ -70,7 +70,7 @@ usage() {
 Usage: mkbox [-n|--no-shell] <boxname|path> [target-ip] [--ad]
        mkbox -c|--clean  <boxname|path>
        mkbox -r|--report [--creds] <boxname|path>
-       mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--title="Text"] [--creds] <box1> [box2 ...]
+       mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--title="Text"] [--final] [--creds] <box1> [box2 ...]
        mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PAT|path]
        mkbox -l|--list
        mkbox -t|--text [summary|recommendations|methodology|status]
@@ -751,6 +751,29 @@ demote_headings() {
   '
 }
 
+# demote_part_headings: stdin -> stdout, for text you wrote in report-parts/. The section's own
+# heading ("# High-Level Summary") is level 1 and "## Tools Used" follows it, so a "# Foo" you type
+# inside would otherwise become a second top-level heading and shift every number after it. Pushes any
+# ATX heading down one level ("#" -> "##"), and turns anything that would land below level 3 (the
+# deepest level the report template defines) into a bold line. Lines inside ``` / ~~~ fences are left
+# alone, so a "# comment" in a pasted code block survives untouched.
+demote_part_headings() {
+  awk '
+    /^(```|~~~)/ { infence = !infence; print; next }
+    infence { print; next }
+    /^#+[ \t]/ {
+      match($0, /^#+/)
+      lvl = RLENGTH + 1
+      rest = substr($0, RLENGTH + 1)
+      sub(/^[ \t]+/, "", rest)
+      if (lvl > 3) { print "**" rest "**" }
+      else { print substr($0, 1, RLENGTH) "# " rest }
+      next
+    }
+    { print }
+  '
+}
+
 # fix_odt_heading_styles <odt_file> <template_file>: two independent, unrelated patches applied to
 # an already-generated ODT, both skipped (silent no-op) if python3 is missing - either way, nothing
 # about the file's content is at risk, since pandoc already produced a complete, valid ODT before
@@ -1035,8 +1058,9 @@ parts_main() {
     ( umask 077
       {
         echo "<!-- $head. $(report_part_hint "$canon")"
-        echo "     Write below this comment - plain paragraphs and lists, no '#' headings (mkbox adds the"
-        echo "     section heading itself). This comment is ignored. Re-running assemble never overwrites this file. -->"
+        echo "     Write below this comment - plain paragraphs and lists; avoid '#' headings (mkbox adds the"
+        echo "     section heading itself, and any heading you add is pushed down a level under it)."
+        echo "     This comment is ignored. Re-running assemble never overwrites this file. -->"
         echo
       } > "$f" )
   fi
@@ -1044,15 +1068,15 @@ parts_main() {
 }
 
 assemble_main() {
-  local with_creds="$1" odt="$2" odt_tpl="$3" author="$4" pdf="$5" osid="$6" title="${7:-OSCP Exam Report}"; shift 7
+  local with_creds="$1" odt="$2" odt_tpl="$3" author="$4" pdf="$5" osid="$6" title="${7:-OSCP Exam Report}" final="${8:-0}"; shift 8
   local outfile="${1:-}"
   if [[ -z "$outfile" ]]; then
-    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--title=\"Text\"] [--creds] <box1> [box2 ...]" >&2
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--title=\"Text\"] [--final] [--creds] <box1> [box2 ...]" >&2
     return 1
   fi
   shift
   if [[ $# -eq 0 ]]; then
-    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--title=\"Text\"] [--creds] <box1> [box2 ...]" >&2
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--title=\"Text\"] [--final] [--creds] <box1> [box2 ...]" >&2
     return 1
   fi
 
@@ -1069,8 +1093,8 @@ assemble_main() {
   mkdir -p "$(dirname -- "$outfile")" 2>/dev/null || true
   # declared before the redirected group below, so nothing in it reads $outfile's name while it is being written
   local pdir_root; pdir_root="$(dirname -- "$outfile")"
-  local -a todo_sections=()
-  local pn pinfo phead pcanon pbody
+  local -a todo_sections=() demoted_parts=()
+  local pn pinfo phead pcanon pbody pdemoted
   {
     # The title is a bold line, not a heading: the official template's own 3 defined heading levels
     # (matching its own 1 / 1.1 / 1.1.1 numbering) are needed below for Target -> per-box sections,
@@ -1085,7 +1109,9 @@ assemble_main() {
       echo
       pbody="$(report_part_body "$pdir_root" "$pcanon")"
       if [[ -n "$pbody" ]]; then
-        printf '%s\n' "$pbody"
+        pdemoted="$(printf '%s\n' "$pbody" | demote_part_headings)"
+        [[ "$pdemoted" == "$pbody" ]] || demoted_parts+=("$phead")
+        printf '%s\n' "$pdemoted"
       else
         echo "TODO: $(report_part_hint "$pcanon")"
         todo_sections+=("$phead|$pcanon")
@@ -1153,6 +1179,16 @@ assemble_main() {
   if [[ ${#readiness_notes[@]} -gt 0 ]]; then
     echo "Readiness check - not necessarily wrong, but worth a second look before you submit:"
     printf '  %s\n' "${readiness_notes[@]}"
+  fi
+  if [[ ${#demoted_parts[@]} -gt 0 ]]; then
+    echo "Note: '#' headings in report-parts/ were pushed down a level so the report's numbering stays intact ($(IFS=,; echo "${demoted_parts[*]}" | sed 's/,/, /g'))."
+  fi
+  # --final: the .md draft above is always written (it is only a draft), but nothing that looks
+  # submittable - ODT or PDF - is produced while a section you have to write yourself is still a stub.
+  if [[ "$final" -eq 1 && ${#todo_sections[@]} -gt 0 ]]; then
+    echo "mkbox: --final: not exporting - ${#todo_sections[@]} section(s) still unwritten (listed above). Write them, then run this again." >&2
+    echo "       Any older .odt/.pdf next to $outfile is from an earlier run and still has the stubs." >&2
+    return 1
   fi
 
   if [[ "$odt" -eq 1 ]]; then
@@ -1225,6 +1261,10 @@ assemble_main() {
         if _assemble_export_pdf "$odtfile" "$pdffile"; then
           pdf_done=1
         fi
+      fi
+      if [[ "$final" -eq 1 && "$pdf" -eq 1 && "$pdf_done" -eq 0 ]]; then
+        echo "mkbox: --final: no PDF was produced (see above), so this is not a finished export - the ODT is at $odtfile" >&2
+        return 1
       fi
       if [[ "$pdf_done" -eq 1 ]]; then
         echo "ODT draft:       $odtfile"
@@ -1431,6 +1471,7 @@ fi
 
 MODE=run
 NO_SHELL=0
+FINAL=0
 WITH_CREDS=0
 AD_FLAG=0
 ODT=0
@@ -1461,6 +1502,7 @@ while [[ $# -gt 0 ]]; do
     --author=*)     AUTHOR="${1#--author=}" ;;
     --osid=*)       OSID="${1#--osid=}" ;;
     --title=*)      TITLE="${1#--title=}" ;;
+    --final)        FINAL=1 ;;
     -d|--doctor)    MODE=doctor ;;
     -t|--text)      MODE=text ;;
     -h|--help)      usage 0 ;;
@@ -1525,7 +1567,9 @@ if [[ "$MODE" == "list" ]]; then
 fi
 
 if [[ "$MODE" == "assemble" ]]; then
-  assemble_main "$WITH_CREDS" "$ODT" "$ODT_TEMPLATE" "${AUTHOR:-${MKBOX_AUTHOR:-}}" "$PDF" "${OSID:-${MKBOX_OSID:-}}" "${TITLE:-${MKBOX_TITLE:-OSCP Exam Report}}" "$@"
+  # --final on its own means "the finished PDF"; with --odt/--pdf already given it only adds the gate
+  if [[ "$FINAL" -eq 1 && "$ODT" -eq 0 ]]; then ODT=1; PDF=1; fi
+  assemble_main "$WITH_CREDS" "$ODT" "$ODT_TEMPLATE" "${AUTHOR:-${MKBOX_AUTHOR:-}}" "$PDF" "${OSID:-${MKBOX_OSID:-}}" "${TITLE:-${MKBOX_TITLE:-OSCP Exam Report}}" "$FINAL" "$@"
   exit $?
 fi
 
@@ -2212,8 +2256,8 @@ assemble() {                                                                    
   local parent conf out line
   parent="$(dirname -- "$BOX_DIR")"
   conf="$parent/.mkbox-assemble.conf"
-  local -a found=() flags=()
-  local d
+  local -a found=() flags=() given=()
+  local d a want_final=0
   for d in "$parent"/*/; do
     [ -f "${d}box.env" ] && found+=("$(basename -- "${d%/}")")
   done
@@ -2226,14 +2270,20 @@ assemble() {                                                                    
   # Nothing saved yet either: default to --pdf, since that's the single most complete thing this
   # can hand you and it degrades to a plain --odt (or even plainer markdown) on its own if
   # LibreOffice isn't available - never worse than what you'd have gotten by typing nothing.
-  if [ "$#" -gt 0 ]; then
-    flags=("$@")
+  # --final is a one-off gate ("refuse to export while sections are unwritten"), so it is never
+  # saved: a remembered --final would make every later work-in-progress assemble refuse.
+  for a in "$@"; do
+    if [ "$a" = "--final" ]; then want_final=1; else given+=("$a"); fi
+  done
+  if [ ${#given[@]} -gt 0 ]; then
+    flags=("${given[@]}")
     printf '%s\n' "${flags[@]}" > "$conf" 2>/dev/null
   elif [ -f "$conf" ]; then
     while IFS= read -r line; do flags+=("$line"); done < "$conf"
   else
     flags=(--pdf)
   fi
+  if [ "$want_final" -eq 1 ]; then flags+=(--final); fi
   out="$parent/report.md"
   echo "Assembling ${#found[@]} box(es) into $out: ${found[*]}"
   ( cd -- "$parent" && "$MKBOX_BIN" -a "$out" "${flags[@]}" "${found[@]}" )

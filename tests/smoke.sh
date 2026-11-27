@@ -22,6 +22,13 @@ check() { local desc="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$desc"; else
 has()   { grep -qF -- "$2" "$1"; }                       # has <file> <text>
 lacks() { ! grep -qF -- "$2" "$1"; }                     # lacks <file> <text>
 mode()  { [ "$(stat -c %a "$1")" = "$2" ]; }             # mode <path> <octal>
+# skipped <what>: a check group that needs pandoc / LibreOffice / pdftotext and can't run here. Normally
+# just a note; with MKBOX_REQUIRE_PDF=1 (CI sets it) it is a failure, so the PDF path can't silently go
+# untested again.
+skipped() {
+  if [ "${MKBOX_REQUIRE_PDF:-0}" = 1 ]; then bad "$1 - needed but unavailable (MKBOX_REQUIRE_PDF=1)"
+  else echo "  skip  $1"; fi
+}
 
 # --- stubs --------------------------------------------------------------------------------------
 cat > "$T/bin/nmap" <<'STUB'
@@ -516,6 +523,8 @@ with zipfile.ZipFile('$TPL', 'w') as z:
       pdftotext "$T/assembled4.pdf" "$T/assembled4.pdf.txt" 2>/dev/null
       check "assemble --pdf: TOC has a real, non-zero page number, not a placeholder" bash -c "
         grep -A1 'Table of Contents' '$T/assembled4.pdf.txt' | grep -Eq '\.{3,}[[:space:]]*[1-9][0-9]*[[:space:]]*\$|[1-9][0-9]*\$'"
+    else
+      skipped "--pdf TOC page-number check (pdftotext not installed)"
     fi
     # a RELATIVE outfile (mkbox -a report.md --pdf) once made the export fail: LibreOffice rejects
     # relative paths as URLs, so the helper has to make them absolute itself
@@ -523,7 +532,7 @@ with zipfile.ZipFile('$TPL', 'w') as z:
     ( cd "$T/relpdf" && cp -r "$T/my labs/smoke" ./smoke 2>/dev/null; PATH="$REALPY_DIR:$PATH" "$MK" -a report.md --pdf smoke > "$T/assemble-rel.out" 2>&1 )
     check "assemble --pdf: works with a relative output path" bash -c "[ -s '$T/relpdf/report.pdf' ]"
   else
-    echo "  skip  --pdf checks (no uno-capable python3 and/or soffice on this machine)"
+    skipped "--pdf checks (no uno-capable python3 and/or soffice on this machine)"
   fi
   # --pdf without a working soffice still has to degrade to "the ODT is fine, here's how to finish
   # it by hand" instead of failing outright. $T/bin is first on PATH (set at the top of this
@@ -546,7 +555,7 @@ with zipfile.ZipFile('$TPL', 'w') as z:
     check "bundled template ships inside the repo" bash -c "[ -s '$DEFAULT_TPL' ]"
   fi
 else
-  echo "  skip  --odt checks (pandoc not installed)"
+  skipped "--odt checks (pandoc not installed)"
 fi
 
 # --- in-shell "boxes" / "assemble" helpers -------------------------------------------------------
@@ -581,7 +590,7 @@ check "assemble (in-shell): remembers last call's flags on a later bare call" ba
   [ -s '$T/my labs/report.odt' ] && [ ! -e '$T/my labs/report.pdf' ]"
 rm -f "$T/my labs/report.md" "$T/my labs/report.odt" "$T/my labs/report.pdf" "$T/my labs/.mkbox-assemble.conf"
 else
-  echo "  skip  in-shell assemble --odt/--pdf checks (pandoc not installed)"
+  skipped "in-shell assemble --odt/--pdf checks (pandoc not installed)"
 fi
 
 # --- install.sh: the installed tree must be complete, found through the bin/ symlink ---------------
@@ -649,6 +658,67 @@ check "assemble: rerunning never overwrites your text"     has "$PD/report-parts
 check "--text: unknown section name is rejected"           bash -c "! (cd '$PD' && '$MK' --text bogus >/dev/null 2>&1)"
 printf '%s\n' 'reporttext' 'exit' | "$MK" smoke > "$T/parts-shell.out" 2>&1
 check "reporttext (in-shell) shows the same status"        has "$T/parts-shell.out" "Report sections you write yourself"
+
+# a "#" heading inside your own text must not become a second top-level heading (it would break the
+# 1 / 1.1 / 1.1.1 numbering): it is pushed down a level, deeper ones become bold, fenced lines are left alone
+printf '<!-- guidance -->\n\n# Big heading\n\nIntro.\n\n## Sub\n\n### Deeper\n\n```\n# not a heading\n```\n' > "$PD/report-parts/methodology.md"
+( cd "$PD" && "$MK" -a report.md smoke > "$T/parts-asm3.out" 2>&1 )
+check "heading demotion: '# X' in your text becomes '## X'"       bash -c "grep -qx '## Big heading' '$PD/report.md'"
+check "heading demotion: '## X' becomes '### X'"                  bash -c "grep -qx '### Sub' '$PD/report.md'"
+check "heading demotion: past level 3 becomes a bold line"        bash -c "grep -qx '\*\*Deeper\*\*' '$PD/report.md'"
+check "heading demotion: no stray top-level '# Big heading'"      bash -c "! grep -qx '# Big heading' '$PD/report.md'"
+check "heading demotion: '#' inside a code fence is untouched"    bash -c "grep -qx '# not a heading' '$PD/report.md'"
+check "heading demotion: the three section headings stay level 1" bash -c "[ \$(grep -cE '^# (High-Level Summary|Recommendations|Methodology)\$' '$PD/report.md') -eq 3 ]"
+check "heading demotion: assemble says it demoted something"      has "$T/parts-asm3.out" "pushed down a level"
+check "heading demotion: your file on disk is not rewritten"      has "$PD/report-parts/methodology.md" "# Big heading"
+printf 'Plain text only.\n' > "$PD/report-parts/methodology.md"
+( cd "$PD" && "$MK" -a report.md smoke > "$T/parts-asm5.out" 2>&1 )
+check "heading demotion: no note when there was nothing to demote" bash -c "! grep -q 'pushed down a level' '$T/parts-asm5.out'"
+
+# --final: refuse to export while a section is unwritten
+FD="$T/final-run" && rm -rf "$FD" && mkdir -p "$FD" && cp -r "$T/my labs/smoke" "$FD/smoke" 2>/dev/null
+( cd "$FD" && "$MK" -a report.md --final smoke > "$T/final1.out" 2>&1 ); FINAL1_RC=$?
+check "--final: exits non-zero while sections are unwritten"       bash -c "[ '$FINAL1_RC' -ne 0 ]"
+check "--final: says it is not exporting"                          has "$T/final1.out" "not exporting"
+check "--final: still lists what to write"                         has "$T/final1.out" "mkbox --text summary"
+check "--final: the Markdown draft is still written"               bash -c "[ -s '$FD/report.md' ]"
+check "--final: no ODT produced"                                   bash -c "[ ! -e '$FD/report.odt' ]"
+check "--final: no PDF produced"                                   bash -c "[ ! -e '$FD/report.pdf' ]"
+check "--final: usage mentions the flag"                           bash -c "'$MK' -h 2>&1 | grep -q -- '--final'"
+( cd "$FD" && "$MK" -a report.md --odt --final smoke > "$T/final2.out" 2>&1 ); FINAL2_RC=$?
+check "--final with --odt is gated the same way"                   bash -c "[ '$FINAL2_RC' -ne 0 ] && [ ! -e '$FD/report.odt' ]"
+( cd "$FD" && "$MK" -a report.md smoke > "$T/final3.out" 2>&1 ); FINAL3_RC=$?
+check "without --final the same TODOs still only warn"             bash -c "[ '$FINAL3_RC' -eq 0 ]"
+mkdir -p "$FD/report-parts"
+for part in summary recommendations methodology; do printf 'Written.\n' > "$FD/report-parts/$part.md"; done
+if command -v pandoc >/dev/null 2>&1 && PATH="${REALPY_DIR:-}:$PATH" command -v soffice >/dev/null 2>&1 && \
+   PATH="${REALPY_DIR:-}:$PATH" python3 -c 'import uno' >/dev/null 2>&1; then
+  rm -f "$FD/report.odt" "$FD/report.pdf"
+  ( cd "$FD" && PATH="$REALPY_DIR:$PATH" "$MK" -a report.md --final smoke > "$T/final4.out" 2>&1 ); FINAL4_RC=$?
+  check "--final, everything written: exits 0"                     bash -c "[ '$FINAL4_RC' -eq 0 ]"
+  check "--final, everything written: --final alone implies --pdf" bash -c "[ -s '$FD/report.pdf' ] && [ -s '$FD/report.odt' ]"
+else
+  skipped "--final export checks (needs pandoc, LibreOffice and uno)"
+fi
+if command -v pandoc >/dev/null 2>&1; then
+  rm -f "$FD/report.odt" "$FD/report.pdf"
+  ( cd "$FD" && "$MK" -a report.md --odt --final smoke > "$T/final5.out" 2>&1 ); FINAL5_RC=$?
+  check "--final --odt, everything written: exports the ODT only"  bash -c "[ '$FINAL5_RC' -eq 0 ] && [ -s '$FD/report.odt' ] && [ ! -e '$FD/report.pdf' ]"
+  # a failed PDF must fail --final instead of degrading to an ODT-only success
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/soffice"; chmod +x "$T/bin/soffice"
+  rm -f "$FD/report.odt" "$FD/report.pdf"
+  ( cd "$FD" && "$MK" -a report.md --final smoke > "$T/final6.out" 2>&1 ); FINAL6_RC=$?
+  rm -f "$T/bin/soffice"
+  check "--final: a failed PDF export is a failure, not a quiet ODT fallback" bash -c "[ '$FINAL6_RC' -ne 0 ] && grep -q 'no PDF was produced' '$T/final6.out'"
+fi
+
+# in-shell: assemble --final never gets remembered for later bare assembles
+rm -f "$T/my labs/.mkbox-assemble.conf" "$T/my labs/report.md" "$T/my labs/report.odt" "$T/my labs/report.pdf"
+rm -rf "$T/my labs/report-parts"
+printf '%s\n' 'assemble --odt' 'assemble --final' 'exit' | "$MK" smoke > "$T/shellfinal.out" 2>&1
+check "assemble --final (in-shell): refuses while sections are unwritten" has "$T/shellfinal.out" "not exporting"
+check "assemble --final (in-shell): not saved to the remembered flags"    bash -c "! grep -q -- '--final' '$T/my labs/.mkbox-assemble.conf' && grep -q -- '--odt' '$T/my labs/.mkbox-assemble.conf'"
+rm -f "$T/my labs/.mkbox-assemble.conf" "$T/my labs/report.md" "$T/my labs/report.odt" "$T/my labs/report.pdf"
 
 # --- re-entering vs typos -----------------------------------------------------------------------
 echo "new vs existing"
