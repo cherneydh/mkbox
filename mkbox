@@ -1414,8 +1414,10 @@ doctor() {
   command -v nmap  >/dev/null 2>&1 && _dr ok nmap  || { apt+=(nmap); _dr missing "nmap           (portscan/udpscan/svcscan)"; }
   if command -v xclip >/dev/null 2>&1 || command -v wl-paste >/dev/null 2>&1; then _dr ok "xclip/wl-clipboard"
   else apt+=(xclip); _dr missing "xclip or wl-clipboard   (shot)"; fi
-  command -v pandoc >/dev/null 2>&1 && _dr ok pandoc || { apt+=(pandoc); _dr missing "pandoc         (assemble --odt / --pdf)"; }
-  command -v soffice >/dev/null 2>&1 && _dr ok soffice || { apt+=(libreoffice-writer); _dr missing "soffice        (assemble --pdf: libreoffice-writer)"; }
+  if command -v pandoc >/dev/null 2>&1; then _dr ok pandoc
+  else apt+=(pandoc); _dr missing "pandoc         (assemble --odt / --pdf)"; fi
+  if command -v soffice >/dev/null 2>&1; then _dr ok soffice
+  else apt+=(libreoffice-writer); _dr missing "soffice        (assemble --pdf: libreoffice-writer)"; fi
   if { command -v python3 >/dev/null 2>&1 && python3 -c 'import uno' >/dev/null 2>&1; } \
      || [[ -x /usr/lib/libreoffice/program/python ]]; then _dr ok "python uno"
   else apt+=(python3-uno); _dr missing "python3 uno    (assemble --pdf: python3-uno)"; fi
