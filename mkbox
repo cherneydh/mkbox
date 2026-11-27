@@ -1181,7 +1181,9 @@ assemble_main() {
     printf '  %s\n' "${readiness_notes[@]}"
   fi
   if [[ ${#demoted_parts[@]} -gt 0 ]]; then
-    echo "Note: '#' headings in report-parts/ were pushed down a level so the report's numbering stays intact ($(IFS=,; echo "${demoted_parts[*]}" | sed 's/,/, /g'))."
+    local dp
+    printf -v dp '%s, ' "${demoted_parts[@]}"
+    echo "Note: '#' headings in report-parts/ were pushed down a level so the report's numbering stays intact (${dp%, })."
   fi
   # --final: the .md draft above is always written (it is only a draft), but nothing that looks
   # submittable - ODT or PDF - is produced while a section you have to write yourself is still a stub.

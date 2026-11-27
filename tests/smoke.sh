@@ -661,6 +661,7 @@ check "reporttext (in-shell) shows the same status"        has "$T/parts-shell.o
 
 # a "#" heading inside your own text must not become a second top-level heading (it would break the
 # 1 / 1.1 / 1.1.1 numbering): it is pushed down a level, deeper ones become bold, fenced lines are left alone
+# shellcheck disable=SC2016  # the backticks are literal markdown fence text, not a command substitution
 printf '<!-- guidance -->\n\n# Big heading\n\nIntro.\n\n## Sub\n\n### Deeper\n\n```\n# not a heading\n```\n' > "$PD/report-parts/methodology.md"
 ( cd "$PD" && "$MK" -a report.md smoke > "$T/parts-asm3.out" 2>&1 )
 check "heading demotion: '# X' in your text becomes '## X'"       bash -c "grep -qx '## Big heading' '$PD/report.md'"
