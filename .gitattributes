@@ -1,0 +1,5 @@
+# Keep line endings stable so scripts and tests behave the same on every checkout.
+* text=auto eol=lf
+*.odt binary
+*.sh text eol=lf
+mkbox text eol=lf
