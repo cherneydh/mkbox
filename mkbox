@@ -1660,7 +1660,7 @@ sethost() {                                                                     
     line="$(grep -iE "(^|[[:space:]])${esc}([[:space:]]|\$)" "$hosts" 2>/dev/null | grep -v '^[[:space:]]*#' || true)"
     if [ -z "$line" ]; then
       to_add+=("$d")
-    elif printf '%s\n' "$line" | grep -q "^$ip[[:space:]]"; then
+    elif printf '%s\n' "$line" | grep -q "^${ip}[[:space:]]"; then
       echo "sethost: '$d' -> $ip is already in $hosts"
     else
       echo "sethost: '$d' is already in $hosts pointing somewhere else - leaving it; edit it yourself if that's stale:"
