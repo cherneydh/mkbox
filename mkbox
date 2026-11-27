@@ -1410,8 +1410,10 @@ doctor() {
     if command -v "$t" >/dev/null 2>&1; then _dr ok "$t"; else _dr MISSING "$t"; have_req=0; fi
   done
   echo "Optional:"
-  command -v perl  >/dev/null 2>&1 && _dr ok perl  || { apt+=(perl); _dr missing "perl           (log cleanup falls back to a cruder sed)"; }
-  command -v nmap  >/dev/null 2>&1 && _dr ok nmap  || { apt+=(nmap); _dr missing "nmap           (portscan/udpscan/svcscan)"; }
+  if command -v perl >/dev/null 2>&1; then _dr ok perl
+  else apt+=(perl); _dr missing "perl           (log cleanup falls back to a cruder sed)"; fi
+  if command -v nmap >/dev/null 2>&1; then _dr ok nmap
+  else apt+=(nmap); _dr missing "nmap           (portscan/udpscan/svcscan)"; fi
   if command -v xclip >/dev/null 2>&1 || command -v wl-paste >/dev/null 2>&1; then _dr ok "xclip/wl-clipboard"
   else apt+=(xclip); _dr missing "xclip or wl-clipboard   (shot)"; fi
   if command -v pandoc >/dev/null 2>&1; then _dr ok pandoc
