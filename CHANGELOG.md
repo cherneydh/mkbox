@@ -15,9 +15,16 @@ The first production release.
   sections still unwritten, each with the command to fix it. With no argument, `reporttext` shows which
   are done. Aliases: `recs`, `method`.
 
+### Fixed
+
+- **`--pdf` failed with a relative output path.** `mkbox -a report.md --pdf ...` fell back to "ODT only,
+  finish by hand" because LibreOffice rejects relative paths as URLs ("Unsupported URL"). The in-shell
+  `assemble` always passed an absolute path, so it never showed; the PDF helper now makes both paths
+  absolute itself.
+
 ### Internal
 
-- `VERSION` is 1.4.7. tests/smoke.sh: 13 new checks for the above (273/273 passing); one existing check
+- `VERSION` is 1.4.7. tests/smoke.sh: 13 new checks for the above (274/274 passing; the new `--pdf` relative-path check only runs where LibreOffice and its `uno` module are installed); one existing check
   updated for the stub's capitalised wording.
 
 ## 1.4.6

@@ -517,6 +517,11 @@ with zipfile.ZipFile('$TPL', 'w') as z:
       check "assemble --pdf: TOC has a real, non-zero page number, not a placeholder" bash -c "
         grep -A1 'Table of Contents' '$T/assembled4.pdf.txt' | grep -Eq '\.{3,}[[:space:]]*[1-9][0-9]*[[:space:]]*\$|[1-9][0-9]*\$'"
     fi
+    # a RELATIVE outfile (mkbox -a report.md --pdf) once made the export fail: LibreOffice rejects
+    # relative paths as URLs, so the helper has to make them absolute itself
+    rm -rf "$T/relpdf" && mkdir "$T/relpdf"
+    ( cd "$T/relpdf" && cp -r "$T/my labs/smoke" ./smoke 2>/dev/null; PATH="$REALPY_DIR:$PATH" "$MK" -a report.md --pdf smoke > "$T/assemble-rel.out" 2>&1 )
+    check "assemble --pdf: works with a relative output path" bash -c "[ -s '$T/relpdf/report.pdf' ]"
   else
     echo "  skip  --pdf checks (no uno-capable python3 and/or soffice on this machine)"
   fi

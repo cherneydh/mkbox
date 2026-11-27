@@ -12,6 +12,7 @@ now-updated document.
 Exits non-zero (mkbox treats that as "PDF export didn't work out, the ODT is still fine") on any
 failure: can't reach the LibreOffice instance, can't open the document, can't export.
 """
+import os
 import sys
 
 
@@ -27,7 +28,9 @@ def main():
     if len(sys.argv) != 4:
         print("usage: mkbox-update-toc.py <port> <odt-path> <pdf-path>", file=sys.stderr)
         return 1
-    port, odt_path, pdf_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    port = sys.argv[1]
+    # LibreOffice rejects relative paths ("Unsupported URL"), and mkbox -a report.md --pdf passes one
+    odt_path, pdf_path = os.path.abspath(sys.argv[2]), os.path.abspath(sys.argv[3])
 
     import uno
 
