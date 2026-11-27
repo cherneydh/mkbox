@@ -622,6 +622,7 @@ check "--doctor: flags a bare script copy (no template/lib)" bash -c "[ '$BARE_R
 echo "report sections (--text)"
 PD="$T/parts-run" && rm -rf "$PD" && mkdir -p "$PD" && cp -r "$T/my labs/smoke" "$PD/smoke" 2>/dev/null
 EDSH="$T/fake-editor.sh"
+# shellcheck disable=SC2016  # single quotes on purpose: $1 belongs to the generated editor script
 printf '#!/bin/sh\nprintf "Tested two hosts.\\n\\n- two high findings\\n" >> "$1"\n' > "$EDSH" && chmod +x "$EDSH"
 ( cd "$PD" && "$MK" --text > "$T/parts-status1.out" 2>&1 )
 check "--text: status lists all three sections as TODO"     bash -c "[ \$(grep -c 'TODO' '$T/parts-status1.out') -eq 3 ]"
