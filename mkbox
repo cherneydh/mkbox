@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-VERSION="1.4.5"
+VERSION="1.4.6"
 
 # Where mkbox itself lives, so it can find its bundled templates/ (see --odt) regardless of which
 # directory it was invoked from or whether $0 is a symlink.

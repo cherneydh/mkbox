@@ -28,18 +28,24 @@ A small bash utility for organizing and documenting penetration-testing practice
 ## Install
 
 ```
-git clone https://github.com/cherneydh/mkbox mkbox && cd mkbox
-sudo install -m 755 mkbox /usr/local/bin/mkbox
+git clone https://github.com/cherneydh/mkbox && cd mkbox
+./install.sh            # sudo ./install.sh for system-wide; ./install.sh --check just reports dependencies
 ```
 
-Or put `mkbox` anywhere on your `PATH` (for example `~/bin`) and `chmod +x mkbox`.
+`install.sh` puts the whole tree in `<prefix>/share/mkbox/` (the script, `lib/`, and `templates/`) and symlinks `<prefix>/bin/mkbox` to it. The prefix is `/usr/local` when you can write there (or run it with `sudo`), otherwise `~/.local` (make sure `~/.local/bin` is on your `PATH`); pass `--prefix DIR` to choose another. It checks that the installed copy is complete, then lists any missing dependencies along with the `apt` command that fixes them. `./install.sh --uninstall` removes it again.
 
-Requirements:
+**Don't just copy the `mkbox` file onto your `PATH`.** The script locates `templates/mkbox-default.odt` (the default `--odt` template) and `lib/mkbox-update-toc.py` (the page-number step behind `--pdf`) relative to where it really lives, so a bare copy works for everything *except* `--odt`/`--pdf`, which will tell you the template is missing. Running straight from a checkout (`./mkbox ...`) or through a symlink to it is fine, since both resolve back to the full tree.
 
-- `bash` 4.4 or newer (developed and tested on 5.2, which is what current Kali ships), `script` (util-linux), `tar`, `find`, and GNU `date`, `sed`, `awk`, `grep` (all standard on Kali)
-- `perl` for log cleanup (preinstalled on Kali; without it, cleanup falls back to a cruder `sed` version)
+Requirements - everything below is on a stock Kali install except where noted:
+
+- **Required:** `bash` 4.4 or newer (developed and tested on 5.2, which is what current Kali ships), `script` (util-linux), `tar`, `find`, and GNU `date`, `sed`, `awk`, `grep`
+- `perl` for log cleanup (without it, cleanup falls back to a cruder `sed` version)
 - `nmap` for `portscan`, `udpscan` and `svcscan`
 - `xclip` (X11) or `wl-clipboard` (Wayland) for `shot`
+- `pandoc` for `assemble --odt` (and `--pdf`, which builds on it)
+- `libreoffice-writer` (`soffice`) plus the `uno` Python module (`python3-uno`) for `assemble --pdf`; without them `--pdf` falls back to the `.odt` and tells you how to finish by hand
+
+On Debian/Kali: `sudo apt install nmap xclip pandoc libreoffice-writer python3-uno`
 
 ## Quick start
 
@@ -570,8 +576,10 @@ The whole tool is a single readable bash script (`mkbox`), so it is easy to audi
 `tests/smoke.sh` is a self-contained smoke test (stubs for `nmap`, `sudo`, `ssh` and friends; no network, nothing outside a temp directory). CI runs it together with `shellcheck`:
 
 ```
-shellcheck mkbox tests/smoke.sh
+shellcheck mkbox install.sh tests/smoke.sh
 bash tests/smoke.sh
 ```
+
+The `--odt` checks need `pandoc` and are skipped when it isn't installed; the `--pdf` checks additionally need LibreOffice with `uno`.
 
 See `CHANGELOG.md` for what changed in each release.

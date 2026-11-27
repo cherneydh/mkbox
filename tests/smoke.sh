@@ -579,6 +579,23 @@ else
   echo "  skip  in-shell assemble --odt/--pdf checks (pandoc not installed)"
 fi
 
+# --- install.sh: the installed tree must be complete, found through the bin/ symlink ---------------
+echo "install.sh"
+INST_ROOT="$(cd "$(dirname -- "$MK")" && pwd)"
+INST="$T/inst"
+"$INST_ROOT/install.sh" --prefix "$INST" > "$T/install.out" 2>&1
+check "install.sh: installs the script behind a bin/ symlink"   bash -c "[ -L '$INST/bin/mkbox' ] && [ -x '$INST/share/mkbox/mkbox' ]"
+check "install.sh: ships the bundled template"                  bash -c "[ -s '$INST/share/mkbox/templates/mkbox-default.odt' ]"
+check "install.sh: ships the PDF helper"                        bash -c "[ -s '$INST/share/mkbox/lib/mkbox-update-toc.py' ]"
+check "install.sh: installed mkbox runs through the symlink"    bash -c "'$INST/bin/mkbox' -V | grep -Eq '^mkbox [0-9]+\.[0-9]+\.[0-9]+\$'"
+if command -v pandoc >/dev/null 2>&1; then
+  ( cd "$T" && rm -rf instbox && mkdir instbox && cd instbox && "$INST/bin/mkbox" -n ib 10.9.9.9 >/dev/null 2>&1 \
+    && "$INST/bin/mkbox" -a r.md --odt ib > "$T/install-odt.out" 2>&1 )
+  check "install.sh: installed copy can build an --odt with the default template" bash -c "[ -s '$T/instbox/r.odt' ]"
+fi
+"$INST_ROOT/install.sh" --prefix "$INST" --uninstall > /dev/null 2>&1
+check "install.sh: --uninstall removes it"                      bash -c "[ ! -e '$INST/bin/mkbox' ] && [ ! -d '$INST/share/mkbox' ]"
+
 # --- re-entering vs typos -----------------------------------------------------------------------
 echo "new vs existing"
 printf 'exit\n' | "$MK" smoke > "$T/e1.out" 2>&1

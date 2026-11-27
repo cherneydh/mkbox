@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.4.6
+
+Install and presentation pass: a fix for an install path that silently broke `--odt`/`--pdf`, a proper
+installer, and a more professional default report template.
+
+### Fixed
+
+- **The documented install copied only the `mkbox` script.** mkbox looks for its bundled template
+  (`templates/mkbox-default.odt`) and its PDF page-number helper (`lib/mkbox-update-toc.py`) next to the
+  real location of the script, so a bare `sudo install mkbox /usr/local/bin/` left `--odt` failing with
+  "needs a template" and `--pdf` unable to compute a table of contents. The README now points at the new
+  installer and says why a bare copy isn't enough.
+- shellcheck warnings: `local -n` name reuse across two functions (SC2178), and an unbraced
+  `$ip[[:space:]]` in the box-shell rc (SC1087).
+
+### Added
+
+- **`install.sh`**: installs the script, `lib/` and `templates/` together under `<prefix>/share/mkbox/`
+  with a `<prefix>/bin/mkbox` symlink (`--prefix`, `--uninstall`, and `--check` to only report
+  dependencies). It verifies the installed tree is complete, then lists any missing dependencies with the
+  matching `apt` command.
+
+### Changed
+
+- **Refreshed default ODT template.** Arial 10.5pt body; upright navy headings (level 1 ruled);
+  shaded, ruled tables; code blocks as a shaded panel with an accent bar; a left-aligned cover page
+  (title, OSID, author, date); styled table-of-contents entries; and a "Page X of Y" footer with a
+  hairline rule.
+
+### Internal
+
+- tests/smoke.sh: the in-shell `assemble` `--odt`/`--pdf` checks now skip when pandoc is missing; the
+  outline-numbering check no longer depends on how pandoc lays out `styles.xml`; the `$TARGET`/`$LOCAL`
+  test now passes those variables to the box shell unexpanded. New checks cover `install.sh`.
+- CI installs pandoc and also lints `install.sh`.
+
 ## 1.4.5
 
 A second UX audit pass, this time driven by specific ideas rather than a general review: remembering
