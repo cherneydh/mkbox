@@ -6,6 +6,7 @@
 #         mkbox -r|--report [--creds] <boxname|path> build a report draft + evidence tarball
 #         mkbox -p|--pad <box|-g> [edit|add|cmd|show|grep|path]   per-box (or global -g) scratchpad
 #         mkbox -l|--list                            list boxes in the current directory
+#         mkbox -t|--text [summary|recommendations|methodology]   write the report sections mkbox can't (next to the boxes)
 #         mkbox -d|--doctor                          check dependencies and the install
 #         mkbox -V|--version                         print the version
 #
@@ -24,7 +25,7 @@
 
 set -euo pipefail
 
-VERSION="1.4.6"
+VERSION="1.4.7"
 
 # Where mkbox itself lives, so it can find its bundled templates/ (see --odt) regardless of which
 # directory it was invoked from or whether $0 is a symlink.
@@ -72,6 +73,7 @@ Usage: mkbox [-n|--no-shell] <boxname|path> [target-ip] [--ad]
        mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--title="Text"] [--creds] <box1> [box2 ...]
        mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PAT|path]
        mkbox -l|--list
+       mkbox -t|--text [summary|recommendations|methodology|status]
        mkbox -d|--doctor
        mkbox -V|--version
 U
@@ -977,6 +979,70 @@ _assemble_export_pdf() {
 # doesn't guess. The current OSCP Exam Guide doesn't ask for Maintaining Access / House Cleaning
 # sections (no persistence or cleanup expected on exam hosts), so this doesn't generate stubs for
 # those either; check the guide yourself before adding anything like that.
+# --- report sections you write yourself (High-Level Summary, Recommendations, Methodology) -------
+# mkbox only knows what happened on each box, so these three sections are yours to write. They live as
+# small Markdown files in report-parts/ next to the assembled report, so rebuilding the report never
+# overwrites them, and `mkbox -a` pulls them in (or leaves a TODO stub and tells you which are missing).
+# report_part_info <name>: prints "<file>\t<Heading>\t<canonical-name>" (tab-separated) for a section name or alias.
+report_part_info() {
+  case "${1:-}" in
+    summary|high-level|highlevel|hls)      printf 'summary.md\tHigh-Level Summary\tsummary\n' ;;
+    recommendations|recs|recommendation)   printf 'recommendations.md\tRecommendations\trecommendations\n' ;;
+    methodology|method|methods)            printf 'methodology.md\tMethodology\tmethodology\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# report_part_hint <canonical-name>: the guidance that goes at the top of a new section file.
+report_part_hint() {
+  case "$1" in
+    summary)         echo "A short, non-technical paragraph on what you tested and what you found." ;;
+    recommendations) echo "Your overall remediation recommendations." ;;
+    methodology)     echo "Information Gathering / Service Enumeration / Penetration. Check the current OSCP Exam Guide before writing a Maintaining Access / House Cleaning section - it doesn't ask for backdoors or cleanup on exam hosts." ;;
+  esac
+}
+
+# report_part_body <dir> <canonical-name>: prints the section's text with the guidance comment removed.
+# Prints nothing if the file is missing, empty, or still starts with a TODO.
+report_part_body() {
+  local f="$1/report-parts/$2.md" body
+  [[ -f "$f" ]] || return 0
+  body="$(awk '/<!--/{c=1} !c{print} /-->/{c=0}' "$f")"
+  [[ -n "${body//[[:space:]]/}" ]] || return 0
+  [[ "$(printf '%s\n' "$body" | sed -n '/[^[:space:]]/{p;q}')" == TODO* ]] && return 0
+  printf '%s\n' "$body"
+}
+
+# parts_main <dir> [name]: no name = status of all three; with a name, opens that section in $EDITOR
+# (creating it with guidance first).
+parts_main() {
+  local dir="$1" want="${2:-}" n info file head canon f
+  local pdir="$dir/report-parts"
+  if [[ -z "$want" || "$want" == status ]]; then
+    echo "Report sections you write yourself (in $pdir):"
+    for n in summary recommendations methodology; do
+      info="$(report_part_info "$n")"; IFS=$'\t' read -r file head canon <<<"$info"
+      if [[ -n "$(report_part_body "$dir" "$canon")" ]]; then printf '  done   %s\n' "$head"
+      else printf '  TODO   %-20s  -> mkbox --text %s\n' "$head" "$canon"; fi
+    done
+    return 0
+  fi
+  info="$(report_part_info "$want")" || { echo "usage: mkbox --text [summary|recommendations|methodology|status]" >&2; return 1; }
+  IFS=$'\t' read -r file head canon <<<"$info"
+  ( umask 077; mkdir -p -- "$pdir" )
+  f="$pdir/$file"
+  if [[ ! -f "$f" ]]; then
+    ( umask 077
+      {
+        echo "<!-- $head. $(report_part_hint "$canon")"
+        echo "     Write below this comment - plain paragraphs and lists, no '#' headings (mkbox adds the"
+        echo "     section heading itself). This comment is ignored. Re-running assemble never overwrites this file. -->"
+        echo
+      } > "$f" )
+  fi
+  ${EDITOR:-vi} "$f"
+}
+
 assemble_main() {
   local with_creds="$1" odt="$2" odt_tpl="$3" author="$4" pdf="$5" osid="$6" title="${7:-OSCP Exam Report}"; shift 7
   local outfile="${1:-}"
@@ -1009,20 +1075,22 @@ assemble_main() {
     echo
     echo "_Assembled by mkbox $VERSION on $(date '+%F %T') from $(( ${#standalone[@]} + ${#adset[@]} )) box(es). This only pulls together what's in each box - fill in the TODOs below yourself._"
     echo
-    echo "# High-Level Summary"
-    echo
-    echo "TODO: a short, non-technical paragraph on what you tested and what you found."
-    echo
-    echo "# Recommendations"
-    echo
-    echo "TODO: your overall remediation recommendations."
-    echo
-    echo "# Methodology"
-    echo
-    echo "TODO: Information Gathering / Service Enumeration / Penetration. Check the current OSCP"
-    echo "Exam Guide before writing a Maintaining Access / House Cleaning section - it doesn't ask"
-    echo "for backdoors or cleanup on exam hosts."
-    echo
+    local pdir_root; pdir_root="$(dirname -- "$outfile")"
+    local -a todo_sections=()
+    local pn pinfo pfile phead pcanon pbody
+    for pn in summary recommendations methodology; do
+      pinfo="$(report_part_info "$pn")"; IFS=$'\t' read -r pfile phead pcanon <<<"$pinfo"
+      echo "# $phead"
+      echo
+      pbody="$(report_part_body "$pdir_root" "$pcanon")"
+      if [[ -n "$pbody" ]]; then
+        printf '%s\n' "$pbody"
+      else
+        echo "TODO: $(report_part_hint "$pcanon")"
+        todo_sections+=("$phead|$pcanon")
+      fi
+      echo
+    done
     echo "## Tools Used"
     echo
     echo "In addition to the standard toolset (nmap, Metasploit, etc. - list anything else you used"
@@ -1075,6 +1143,11 @@ assemble_main() {
   if [[ ${#box_warnings[@]} -gt 0 ]]; then
     echo "Carried over from each box's own report - fix these before this goes in your report:"
     printf '  %s\n' "${box_warnings[@]}"
+  fi
+  if [[ ${#todo_sections[@]} -gt 0 ]]; then
+    echo "Still to write before you submit (these are TODO stubs in the draft):"
+    local ts
+    for ts in "${todo_sections[@]}"; do printf '  %-22s ->  reporttext %s   (or: mkbox --text %s)\n' "${ts%|*}" "${ts#*|}" "${ts#*|}"; done
   fi
   if [[ ${#readiness_notes[@]} -gt 0 ]]; then
     echo "Readiness check - not necessarily wrong, but worth a second look before you submit:"
@@ -1388,6 +1461,7 @@ while [[ $# -gt 0 ]]; do
     --osid=*)       OSID="${1#--osid=}" ;;
     --title=*)      TITLE="${1#--title=}" ;;
     -d|--doctor)    MODE=doctor ;;
+    -t|--text)      MODE=text ;;
     -h|--help)      usage 0 ;;
     --)             shift; POSITIONAL+=("$@"); break ;;
     -*)             echo "mkbox: unknown option $1" >&2; usage 1 ;;
@@ -1433,6 +1507,11 @@ doctor() {
   fi
   [[ "$have_req" -eq 1 ]]
 }
+
+if [[ "$MODE" == "text" ]]; then
+  parts_main "$PWD" "${1:-}"
+  exit $?
+fi
 
 if [[ "$MODE" == "doctor" ]]; then
   doctor
@@ -2125,6 +2204,9 @@ report()   { "$MKBOX_BIN" -r "$@" "$BOX_DIR"; }                                 
 boxes() {                                                                                    # lists every box next to this one (same table as mkbox -l) - check what else is in play without leaving this shell
   ( cd -- "$(dirname -- "$BOX_DIR")" 2>/dev/null && "$MKBOX_BIN" -l )
 }
+reporttext() {                                                                               # reporttext [summary|recommendations|methodology|status] - write the report sections only you can write; saved next to the boxes, so assemble never overwrites them
+  ( cd -- "$(dirname -- "$BOX_DIR")" 2>/dev/null && "$MKBOX_BIN" --text "$@" )
+}
 assemble() {                                                                                 # assemble [mkbox -a flags] - rebuilds the WHOLE report from every box next to this one, without leaving this shell or typing out box names
   local parent conf out line
   parent="$(dirname -- "$BOX_DIR")"
@@ -2162,7 +2244,7 @@ LOCAL="$LHOST"; export LOCAL
 echo "Target: \$IP / \$TARGET = ${IP:-<unset>}"
 echo "Local:  \$LHOST / \$LOCAL = ${LHOST:-<no tun0/tap0>}"
 echo "Dir:    $BOX_DIR"
-echo "Helpers: note pad shot proofshot boxinfo boxcd setip sethost setad portscan udpscan svcscan serve pivot addcred creds addexploit addvuln proofcmd markproof cleanlog report boxes assemble"
+echo "Helpers: note pad shot proofshot boxinfo boxcd setip sethost setad portscan udpscan svcscan serve pivot addcred creds addexploit addvuln proofcmd markproof cleanlog report boxes reporttext assemble"
 echo "Proof, in one line: get local.txt/proof.txt on screen -> screenshot it (clipboard) -> proofshot local|proof"
 echo "         (no need to copy the flag text first - that part of proofshot is optional, just for the write-up)"
 echo "Whole report, in one word: assemble   (rebuilds report.md/.odt/.pdf next to this box, from every box next to it too)"

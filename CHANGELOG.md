@@ -2,7 +2,23 @@
 
 ## 1.4.7
 
-Separating as the first production release.
+The first production release.
+
+### Added
+
+- **`reporttext` / `mkbox --text`: write the report sections only you can write.** The High-Level
+  Summary, Recommendations and Methodology can't come from session notes, so `assemble` used to leave
+  `TODO` stubs in the report and hand-edits to `report.md` were lost on the next rebuild. These now live
+  in `report-parts/` next to the assembled report (`summary.md`, `recommendations.md`,
+  `methodology.md`): `reporttext summary` opens a file with a short guidance comment already in it,
+  `assemble` pulls the text in (never overwriting it), and every `assemble` ends with a checklist of the
+  sections still unwritten, each with the command to fix it. With no argument, `reporttext` shows which
+  are done. Aliases: `recs`, `method`.
+
+### Internal
+
+- `VERSION` is 1.4.7. tests/smoke.sh: 13 new checks for the above (273/273 passing); one existing check
+  updated for the stub's capitalised wording.
 
 ## 1.4.6
 

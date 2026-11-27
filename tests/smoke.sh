@@ -429,7 +429,7 @@ check "assemble: findings carried through (bold, past the heading-depth cap)" ha
 check "assemble: no literal #### anywhere"         bash -c "! grep -q '^####' '$A'"
 check "assemble: box's own H1 title dropped"       bash -c "! grep -q '^# smoke - report draft' '$A'"
 check "assemble: unfilled notes section flagged"   has "$A" "_(nothing recorded)_"
-check "assemble: TODO stubs present"               has "$A" "TODO: a short, non-technical paragraph"
+check "assemble: TODO stubs present"               has "$A" "TODO: A short, non-technical paragraph"
 check "assemble: no outfile given gives usage"     bash -c "'$MK' -a 2>&1 | grep -q 'usage: mkbox -a'"
 check "assemble: no boxes given gives usage"       bash -c "'$MK' -a '$T/x.md' 2>&1 | grep -q 'usage: mkbox -a'"
 check "assemble: unknown box errors out"           bash -c "! '$MK' -a '$T/x.md' not-a-real-box 2>/dev/null"
@@ -617,6 +617,32 @@ check "--doctor: exits 0 when nothing required is missing" bash -c "[ '$DOCTOR_R
 BARE="$T/bare" && mkdir -p "$BARE" && cp "$MK" "$BARE/mkbox"
 "$BARE/mkbox" --doctor > "$T/doctor-bare.out" 2>&1; BARE_RC=$?
 check "--doctor: flags a bare script copy (no template/lib)" bash -c "[ '$BARE_RC' -ne 0 ] && grep -q 'MISSING.*templates/mkbox-default.odt' '$T/doctor-bare.out'"
+
+# --- report sections you write yourself: --text / reporttext -----------------------------------------
+echo "report sections (--text)"
+PD="$T/parts-run" && rm -rf "$PD" && mkdir -p "$PD" && cp -r "$T/my labs/smoke" "$PD/smoke" 2>/dev/null
+EDSH="$T/fake-editor.sh"
+printf '#!/bin/sh\nprintf "Tested two hosts.\\n\\n- two high findings\\n" >> "$1"\n' > "$EDSH" && chmod +x "$EDSH"
+( cd "$PD" && "$MK" --text > "$T/parts-status1.out" 2>&1 )
+check "--text: status lists all three sections as TODO"     bash -c "[ \$(grep -c 'TODO' '$T/parts-status1.out') -eq 3 ]"
+( cd "$PD" && "$MK" -a report.md smoke > "$T/parts-asm1.out" 2>&1 )
+check "assemble: unfilled sections produce a to-do checklist" has "$T/parts-asm1.out" "Still to write before you submit"
+check "assemble: checklist names the command to run"       has "$T/parts-asm1.out" "mkbox --text summary"
+check "assemble: stub still present in the draft"          has "$PD/report.md" "TODO: A short, non-technical paragraph"
+( cd "$PD" && EDITOR="$EDSH" "$MK" --text summary && EDITOR="$EDSH" "$MK" --text recs )
+check "--text: creates report-parts/summary.md privately"  bash -c "[ \"\$(stat -c %a '$PD/report-parts/summary.md')\" = 600 ]"
+check "--text: new file carries the guidance comment"       has "$PD/report-parts/summary.md" "This comment is ignored"
+( cd "$PD" && "$MK" --text > "$T/parts-status2.out" 2>&1 )
+check "--text: status shows summary and recommendations done" bash -c "grep -q 'done   High-Level Summary' '$T/parts-status2.out' && grep -q 'done   Recommendations' '$T/parts-status2.out' && grep -q 'TODO   Methodology' '$T/parts-status2.out'"
+( cd "$PD" && "$MK" -a report.md smoke > "$T/parts-asm2.out" 2>&1 )
+check "assemble: filled text lands in the draft"           has "$PD/report.md" "Tested two hosts."
+check "assemble: guidance comment is not in the draft"     bash -c "! grep -q 'This comment is ignored' '$PD/report.md'"
+check "assemble: only the unwritten section is still listed" bash -c "grep -A3 'Still to write' '$T/parts-asm2.out' | grep -q Methodology && ! grep -A3 'Still to write' '$T/parts-asm2.out' | grep -q 'High-Level Summary'"
+( cd "$PD" && "$MK" -a report.md smoke > /dev/null 2>&1 )
+check "assemble: rerunning never overwrites your text"     has "$PD/report-parts/summary.md" "Tested two hosts."
+check "--text: unknown section name is rejected"           bash -c "! (cd '$PD' && '$MK' --text bogus >/dev/null 2>&1)"
+printf '%s\n' 'reporttext' 'exit' | "$MK" smoke > "$T/parts-shell.out" 2>&1
+check "reporttext (in-shell) shows the same status"        has "$T/parts-shell.out" "Report sections you write yourself"
 
 # --- re-entering vs typos -----------------------------------------------------------------------
 echo "new vs existing"

@@ -21,6 +21,7 @@ A small bash utility for organizing and documenting penetration-testing practice
 - [Findings (addvuln)](#findings-addvuln)
 - [Active Directory sets and assembling the final report](#active-directory-sets-and-assembling-the-final-report)
   - [Assembling without leaving the box](#assembling-without-leaving-the-box)
+  - [Writing the sections only you can write](#writing-the-sections-only-you-can-write)
 - [What it does and doesn't do](#what-it-does-and-doesnt-do)
 - [Caveats](#caveats)
 - [Development](#development)
@@ -76,6 +77,7 @@ mkbox -r|--report [--creds] <boxname|path>
 mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PATTERN|path]
 mkbox -l|--list
 mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--title="Text"] [--creds] <box1> [box2 ...]
+mkbox -t|--text [summary|recommendations|methodology|status]
 mkbox -d|--doctor
 mkbox -V|--version
 ```
@@ -94,6 +96,7 @@ mkbox -V|--version
 | `mkbox -p lame`            | Opens the box's scratchpad in `$EDITOR` (see [Scratchpad](#scratchpad))          |
 | `mkbox -l`                 | Lists boxes in the current directory with target IP and proof status             |
 | `mkbox -a draft.md lame dc01 dc02` | Collates several boxes' own reports into one document draft - see [below](#active-directory-sets-and-assembling-the-final-report) |
+| `mkbox -t [section]`       | Writes the report sections only you can (summary, recommendations, methodology) - see [below](#writing-the-sections-only-you-can-write) |
 | `mkbox -d`                 | Doctor: checks dependencies and that the install is complete (template, PDF helper) |
 | `mkbox -V`                 | Prints the version                                                               |
 
@@ -198,6 +201,7 @@ Available inside the box shell:
 | `cleanlog`                  | Rebuilds the cleaned session log mid-session                                                                      |
 | `report [--creds]`          | Same as `mkbox -r` for the current box                                                                            |
 | `boxes`                     | Lists every box next to this one (same table as `mkbox -l`) - check what else is in play without leaving this shell |
+| `reporttext [summary\|recommendations\|methodology\|status]` | Opens the High-Level Summary / Recommendations / Methodology text in `$EDITOR` (no argument: shows which are still unwritten). Saved next to the boxes, so `assemble` pulls it in and never overwrites it - see [below](#writing-the-sections-only-you-can-write) |
 | `assemble [mkbox -a flags]` | Rebuilds the *whole* report from every box next to this one, as `report.md`/`.odt`/`.pdf` in their shared parent directory - no need to leave this shell, list every box by name, or retype flags each time; see [Assembling without leaving the box](#assembling-without-leaving-the-box) |
 
 ### Credentials (`creds`)
@@ -503,7 +507,7 @@ No outfile, no box list, no flags required:
 
 This produces `draft.md` with:
 
-- `High-Level Summary`, `Recommendations`, and `Methodology` as `TODO` stubs - `mkbox` only knows what happened on each box, not what to say about it, so (same as everywhere else) it doesn't guess. The `Methodology` stub is a reminder to write up Information Gathering / Service Enumeration / Penetration from what you actually did; it deliberately does **not** add a Maintaining Access / House Cleaning stub, since the current OSCP Exam Guide doesn't ask for persistence or cleanup on exam hosts - check the guide yourself before adding one, in case that changes.
+- `High-Level Summary`, `Recommendations`, and `Methodology` - `mkbox` only knows what happened on each box, not what to say about it, so (same as everywhere else) it doesn't guess. Write them once with `reporttext` (see [below](#writing-the-sections-only-you-can-write)); until you do, each is a `TODO` stub and `assemble` lists exactly which ones are still missing. The `Methodology` guidance is a reminder to write up Information Gathering / Service Enumeration / Penetration from what you actually did; it deliberately does **not** add a Maintaining Access / House Cleaning stub, since the current OSCP Exam Guide doesn't ask for persistence or cleanup on exam hosts - check the guide yourself before adding one, in case that changes.
 - A **Tools Used** section under `Methodology`, already filled in (not a `TODO`) naming `mkbox` itself and its version/repo link, alongside a reminder to list anything else you used - OSCP reporting expects any extra tooling beyond the standard set to be documented, and this one you don't have to remember to add yourself.
 - `Independent Challenges`, with every box you didn't flag as AD, each nested under its own `Target #N - <ip>` heading.
 - `Active Directory Set`, with every flagged box: first one combined ports table (IP + open TCP ports, across all of them), then each box's own write-up nested under `<boxname> - <ip>` instead of a generic `Target #N`.
@@ -540,6 +544,25 @@ mkbox -a draft.md --pdf --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02 
 `--pdf` implies `--odt` (so you still get both `draft.odt` and `draft.pdf`), then drives a throwaway, invisible LibreOffice instance over its own UNO scripting interface to do what you'd otherwise do by hand: open the ODT, update every index (which is what actually computes real page numbers), resave it, and export the PDF from that updated copy - so the TOC in `draft.pdf` is already correct, not frozen at "no page computed yet". It uses its own LibreOffice profile and a random port each run, so it won't conflict with a LibreOffice window you already have open.
 
 This needs `soffice` (LibreOffice itself) and a `python3` with its `uno` module available - both are already present on a normal LibreOffice install (true for Kali and most exam-VM setups by default). If either is missing, or the LibreOffice instance never comes up, `--pdf` degrades to exactly what `--odt` alone would have done: the ODT is still written, and `mkbox` tells you to finish it yourself (Tools > Update All, then File > Export As PDF) rather than failing the whole assemble over a nice-to-have.
+
+### Writing the sections only you can write
+
+Three sections of the report can't come from your notes: the **High-Level Summary**, the **Recommendations**, and the **Methodology**. Write them without leaving the box shell:
+
+```
+reporttext                    # which of the three are written, which are still TODO
+reporttext summary            # opens it in $EDITOR (a short guidance comment is already at the top)
+reporttext recommendations    # alias: recs
+reporttext methodology        # alias: method
+assemble                      # pulls them in; lists whatever is still a TODO stub
+```
+
+Outside the shell the same thing is `mkbox --text [section]`, run from the directory your boxes (and `report.md`) live in.
+
+- **They live in `report-parts/` next to the assembled report** (`summary.md`, `recommendations.md`, `methodology.md`), not inside `report.md`, so rebuilding the report - which regenerates `report.md` from the boxes every time - never overwrites your writing.
+- **Write plain paragraphs and lists, no `#` headings** - `mkbox` adds the section heading itself. The guidance comment at the top of each new file is ignored; you can leave it or delete it. A file that's empty or still starts with `TODO` counts as unwritten.
+- **Every `assemble` ends with a checklist** of whatever is still unwritten, with the exact command for each, so you find out before the PDF rather than after.
+- The `Tools Used` subsection under `Methodology` is added automatically after your text.
 
 ## What it does and doesn't do
 
