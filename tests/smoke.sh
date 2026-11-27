@@ -105,9 +105,9 @@ check "markproof: root is an alias for proof" has smoke/notes/notes.md "- [x] pr
 # $TARGET/$LOCAL: friendlier aliases for $IP/$LHOST, so a command typed mid-engagement doesn't
 # need either memorized or retyped - must track $IP/$LHOST exactly, including through setip
 printf '%s\n' \
-  'echo "T1=$TARGET L1=$LOCAL"' \
+  "echo 'T1=$TARGET L1=$LOCAL'" \
   'setip 10.10.10.55' \
-  'echo "T2=$TARGET"' \
+  "echo 'T2=$TARGET'" \
   'exit' | FAKE_TUN0=10.10.14.7 "$MK" smoke > "$T/aliases.out" 2>&1
 check "\$TARGET starts out equal to \$IP"        has "$T/aliases.out" "T1=10.10.10.9"
 check "\$LOCAL starts out equal to \$LHOST"      has "$T/aliases.out" "L1=10.10.14.7"
