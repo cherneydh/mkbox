@@ -27,6 +27,12 @@ and the exact submission file format.
 
 ### Changed
 
+- **Leaving the box shell now shows log-cleanup progress.** After `exit`, mkbox prints
+  `wrapping up - cleaning the session log` and a progress bar (percent done, which session it is on)
+  while the cleaned log is rebuilt, so a long session doesn't look hung. Ctrl-C is ignored during this
+  step so the log can't be left half-cleaned, and a killed rebuild no longer leaves a temp file behind.
+  `mkbox -c` and `cleanlog` show the same bar on a terminal; it never appears when output is piped, or
+  with `MKBOX_QUIET=1`. Raw logs are never modified either way.
 - **`--final` also stops while a modified exploit has no marked changes, or its markers don't pair up**
   (the exam guide wants highlighted changes). `mkbox -r` and `assemble` show these as
   `WARNING: exploit file ...` lines, like the unfilled-finding warnings.

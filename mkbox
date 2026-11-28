@@ -147,7 +147,22 @@ pad_main() {
 read -r -d '' CLEAN_PL <<'PERL' || true
 use strict; use warnings; no warnings 'utf8';
 binmode(STDIN); binmode(STDOUT);
+# Optional progress bar on stderr (only when build_log asks for it via MKBOX_PROG_*): bytes read so far,
+# counting the raw logs already finished, redrawn in place whenever the whole percentage changes.
+my ($prog, $pdone, $ptotal, $plabel, $plast) = ($ENV{MKBOX_PROG}, $ENV{MKBOX_PROG_DONE} || 0, $ENV{MKBOX_PROG_TOTAL} || 0, $ENV{MKBOX_PROG_LABEL} || '', -1);
+my $psize = (stat(STDIN))[7] || 0;
+sub draw_bar {
+    my ($cur) = @_;
+    my $all = $ptotal > 0 ? $ptotal : 1;
+    my $pct = int(100 * ($pdone + $cur) / $all); $pct = 100 if $pct > 100;
+    return if $pct == $plast;
+    $plast = $pct;
+    my $w = 30; my $f = int($w * $pct / 100);
+    printf STDERR "\r  [%s%s] %3d%%  %s\e[K", '#' x $f, '-' x ($w - $f), $pct, $plabel;
+}
+draw_bar(0) if $prog;
 while (my $line = <STDIN>) {
+    draw_bar(tell(STDIN)) if $prog;
     my $nl = ($line =~ s/\n\z//) ? "\n" : "";
     my $utf8 = utf8::decode($line);          # stays as raw bytes if the line isn't valid UTF-8
     my @b; my $p = 0;
@@ -266,9 +281,10 @@ clean_log() {
 }
 
 # build_log <box_dir> <name>: rebuild session-<name>.log from every raw session log,
-# oldest first, each under a "===== session <start time> =====" header
+# oldest first, each under a "===== session <start time> =====" header. On a terminal it shows a
+# progress bar on stderr (set MKBOX_QUIET=1 to turn that off), since a long session can take a while.
 build_log() {
-  local dir="$1" name="$2" f b tmp
+  local dir="$1" name="$2" f b i=0 n total=0 done_bytes=0 sz show=0
   local files=()
   if [[ -s "$dir/.session-$name.raw" ]]; then      # single-file layout from earlier versions
     files+=("$dir/.session-$name.raw")
@@ -281,20 +297,37 @@ build_log() {
   done
   shopt -u nullglob
   [[ ${#files[@]} -gt 0 ]] || return 0
+  n=${#files[@]}
 
-  tmp="$(mktemp)"
+  if [[ -t 2 && "${MKBOX_QUIET:-0}" != 1 ]]; then
+    show=1
+    for f in "${files[@]}"; do sz="$(wc -c < "$f")"; total=$(( total + sz )); done
+    if ! command -v perl >/dev/null 2>&1; then
+      echo "mkbox: cleaning the session log (no perl, so basic mode)..." >&2
+    fi
+  fi
+
+  BUILD_LOG_TMP="$(mktemp)"               # global so the EXIT trap can remove it if we are killed mid-way
   for f in "${files[@]}"; do
+    i=$(( i + 1 ))
     b="$(basename -- "$f" .raw)"
     if [[ "$b" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})-([0-9]{2})([0-9]{2})([0-9]{2}) ]]; then
       printf '===== session %s-%s-%s %s:%s:%s =====\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}" "${BASH_REMATCH[6]}"
     else
       printf '===== earlier session =====\n'
     fi
-    clean_log "$f"
+    if [[ "$show" -eq 1 ]]; then
+      MKBOX_PROG=1 MKBOX_PROG_DONE="$done_bytes" MKBOX_PROG_TOTAL="$total" MKBOX_PROG_LABEL="session $i of $n" clean_log "$f"
+      sz="$(wc -c < "$f")"; done_bytes=$(( done_bytes + sz ))
+    else
+      clean_log "$f"
+    fi
     echo
-  done > "$tmp"
-  chmod 600 "$tmp"                                  # it holds everything you typed, passwords included
-  mv "$tmp" "$dir/session-$name.log"
+  done > "$BUILD_LOG_TMP"
+  [[ "$show" -eq 1 ]] && printf '\r\033[K' >&2
+  chmod 600 "$BUILD_LOG_TMP"                        # it holds everything you typed, passwords included
+  mv "$BUILD_LOG_TMP" "$dir/session-$name.log"
+  BUILD_LOG_TMP=""
 }
 
 # list_boxes: show every box (directory containing box.env) under the current directory
@@ -1854,7 +1887,8 @@ touch "$BOX_DIR/notes/timeline.md"
 # Written to a temp file and renamed into place, so a tab starting at this exact moment never reads
 # a half-written .box.rc.
 RC_TMP="$(mktemp "$BOX_DIR/.box.rc.XXXXXX")"
-trap 'rm -f "$RC_TMP"' EXIT
+BUILD_LOG_TMP=""
+trap 'rm -f "$RC_TMP" ${BUILD_LOG_TMP:+"$BUILD_LOG_TMP"}' EXIT
 cat > "$RC_TMP" <<'EOF'
 # Sourced by the mkbox shell
 [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
@@ -2575,5 +2609,12 @@ set +e
 script -q -f "$RAW" -c "$SHELL_CMD"
 set -e
 
+# Wrap-up: rebuilding the cleaned log can take a while after a long session, so say so and show
+# progress. Ctrl-C is ignored just for this step (children inherit that), so an impatient keypress
+# can't leave a half-cleaned log. The raw logs are never touched either way.
+echo >&2
+echo "mkbox: wrapping up - cleaning the session log (please wait, Ctrl-C is ignored until it's done)" >&2
+trap '' INT
 build_log "$BOX_DIR" "$NAME"
+trap - INT
 echo "Session log: $LOG"

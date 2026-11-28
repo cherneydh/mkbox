@@ -198,7 +198,7 @@ Not shared: output. Each tab's terminal output goes to that tab's own log.
 
 **Manual edits now stick (until something else writes `box.env`).** Typing `IP=10.10.10.50` by hand is no longer reverted at the next prompt, because the sync only re-sources `box.env` when its mtime changes. It's still better to use `setip`, because that also updates the notes header and the timeline - a hand-set `$IP` only changes the variable. And the next `portscan` / `udpscan` in that tab will happily save your hand-set `$IP` back into `box.env` (sharing it with other tabs), since mkbox has no way to tell a manual edit from an intentional one. For other hosts (pivoting, the AD set), use your own variable names such as `$DC` or `$T2` so they never collide with `box.env` at all - and run `pivot <to-host> <via> [note]` each time you move to a new one (`pivot DC01 "psexec with bob:ntlm-hash"`), so the chain shows up as its own section at the top of the report instead of only as scattered notes in the timeline.
 
-If a session ends abnormally (terminal closed, SSH dropped), cleanup doesn't run. Run `mkbox -c <boxname>` to rebuild the cleaned log.
+On `exit`, mkbox shows a progress bar while it rebuilds the cleaned log (Ctrl-C is ignored until it finishes; set `MKBOX_QUIET=1` to hide the bar). If a session ends abnormally (terminal closed, SSH dropped), cleanup doesn't run. Run `mkbox -c <boxname>` to rebuild the cleaned log.
 
 ## Helpers
 
