@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.5.1
+
+Two things the OSCP+ exam guide asks for that the report didn't cover: the modified exploit code itself,
+and the exact submission file format.
+
+### Added
+
+- **Modified exploit code in the report, with your changes highlighted.** `mkbox -r` now prints the full
+  code of every file in `exploits/` that `addexploit` recorded as modified (or that carries change
+  markers), and of your own scripts (not recorded by `addexploit` at all). An exploit recorded as used
+  as-is stays URL-only, as the guide asks; binary files are never printed, and files over 5000 lines get
+  a note to include the relevant part by hand. Mark what you changed by wrapping it in `mkbox:change` /
+  `mkbox:end` comment lines; the report drops those lines from the code and lists each marked region, with
+  line numbers, under **Highlighted changes**. The whole file is printed, not only the marked parts,
+  because the guide asks for the modified code itself. A stray ``` line in a file can't close the code
+  block early.
+- **`markchanges <file>`** (box shell): shows a numbered preview of a file in `exploits/`, explains the
+  markers, opens it in `$EDITOR`, then confirms how many regions are marked (and flags unpaired markers).
+- **`--submit`** (`mkbox -a ... --submit --osid=OS-12345`, or `assemble --submit` in the box shell):
+  runs the `--final` checks, then writes `OSCP-OS-12345-Exam-Report.pdf` and an unencrypted
+  `OSCP-OS-12345-Exam-Report.7z` containing only that PDF next to the report, refuses an archive over
+  200MB, and prints the archive's MD5 to compare with the one upload.offsec.com shows. The OSID is
+  required and accepted as `OS-12345`, `OS12345` or `os-12345`. Needs `7z` (`p7zip-full`); `--doctor`
+  reports it. Like `--final`, it is never saved into the remembered `assemble` flags.
+
+### Changed
+
+- **`--final` also stops while a modified exploit has no marked changes, or its markers don't pair up**
+  (the exam guide wants highlighted changes). `mkbox -r` and `assemble` show these as
+  `WARNING: exploit file ...` lines, like the unfilled-finding warnings.
+- `--osid` examples now use `OS-12345`, the form the exam guide writes in file names.
+
+### Internal
+
+- `VERSION` is 1.5.1. tests/smoke.sh: 29 new checks (334/334 passing; `7z` is stubbed, so they don't need
+  it installed).
+
 ## 1.5.0
 
 A hardening pass on the report pipeline: a hard stop before export, and the gaps found in final review.

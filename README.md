@@ -47,8 +47,9 @@ Requirements - everything below is on a stock Kali install except where noted:
 - `xclip` (X11) or `wl-clipboard` (Wayland) for `shot`
 - `pandoc` for `assemble --odt` (and `--pdf`, which builds on it)
 - `libreoffice-writer` (`soffice`) plus the `uno` Python module (`python3-uno`) for `assemble --pdf`; without them `--pdf` falls back to the `.odt` and tells you how to finish by hand
+- `p7zip-full` (`7z`) for `assemble --submit`, which packages the PDF the way OffSec's upload wants it
 
-On Debian/Kali: `sudo apt install nmap xclip pandoc libreoffice-writer python3-uno`
+On Debian/Kali: `sudo apt install nmap xclip pandoc libreoffice-writer python3-uno p7zip-full`
 
 ## Quick start
 
@@ -69,6 +70,7 @@ note "anonymous FTP allowed"  # timestamped timeline entry
 pad                           # scratchpad: free-form notes/commands, never part of the report
 serve                         # serve transfer/ over HTTP (or --smb / --webdav), prints the client commands
 addexploit 50064.py https://www.exploit-db.com/exploits/50064 "changed LHOST"   # file in exploits/, with its source
+markchanges 50064.py          # preview it, then mark what you changed; the report prints the code with those lines highlighted
 addcred bob:hunter2 "ssh"     # record a credential (creds N prints ready-to-paste commands for it)
 
 # --- evidence
@@ -89,10 +91,11 @@ boxes                         # every box next to this one, with target IP and p
 reporttext                    # the three sections only you can write; which are done, which are TODO
 reporttext summary            # opens it in $EDITOR (also: recommendations, methodology)
 assemble                      # rebuild the WHOLE report (report.md/.odt/.pdf) from every box; lists what's missing
-assemble --final              # the submit-it export: refuses while a section or finding is still unfinished
+assemble --final              # the submit-it export: refuses while a section, finding or modified exploit is unfinished
+assemble --submit --osid=OS-12345   # same checks, then names the files OffSec's way, builds the .7z and prints its MD5
 ```
 
-Or in one go from a plain terminal: `mkbox -a report.md --final --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02`. Run `mkbox --doctor` any time to check what's installed.
+Or in one go from a plain terminal: `mkbox -a report.md --final --author="Jane Q. Tester" --osid=OS-12345 lame dc01 dc02`. Run `mkbox --doctor` any time to check what's installed.
 
 ## Commands
 
@@ -102,7 +105,7 @@ mkbox -c|--clean  <boxname|path>
 mkbox -r|--report [--creds] <boxname|path>
 mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PATTERN|path]
 mkbox -l|--list
-mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--title="Text"] [--final] [--creds] <box1> [box2 ...]
+mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS-12345] [--title="Text"] [--final|--submit] [--creds] <box1> [box2 ...]
 mkbox -t|--text [summary|recommendations|methodology|status]
 mkbox -d|--doctor
 mkbox -V|--version
@@ -219,6 +222,7 @@ Available inside the box shell:
 | `ssh`, `ftp`, `sftp`, `smbclient`, `rdesktop`, `xfreerdp`, `nc`, `telnet`, `mysql`, ... | Logged automatically on connect/disconnect - see [Logging connections](#logging-connections-ssh-ftp-rdp-) |
 | `addcred user:pass [where]` | Appends to `creds/creds.txt`; the timeline records only the username                                              |
 | `creds [N]`                 | Lists recorded creds with an index; `creds N` prints ready-to-paste `smbclient`/`crackmapexec`/`evil-winrm`/`xfreerdp`/`sshpass`/`ftp` commands for that one, against `$TARGET` - see [Credentials (`creds`)](#credentials-creds) |
+| `markchanges <file>` | Previews a file in `exploits/`, then opens it in `$EDITOR` so you can wrap the regions you changed in `mkbox:change` / `mkbox:end` comment lines; the report prints the whole file and highlights those regions - see [Exploit provenance](#exploit-provenance) |
 | `addexploit <file> <source-url> [what changed]` | Records where a file in `exploits/` came from and what you modified, in `exploits/SOURCES.md`; the report shows this ahead of the plain file list - see [Reporting](#reporting) |
 | `addvuln initial\|privesc\|post <title> <critical\|high\|medium\|low>` | Opens a templated finding in `$EDITOR` (Explanation/Fix) and files it under `vulns/`, in place of an ad-hoc `note "found this: <link>"` - see [Findings](#findings-addvuln) |
 | `setad on\|off`              | Flags (or unflags) the current box as part of an Active Directory set, same as creating it with `--ad` - see [Active Directory sets](#active-directory-sets-and-assembling-the-final-report) |
@@ -407,6 +411,23 @@ addexploit cve-2021-9999.py https://www.exploit-db.com/exploits/9999 "retargeted
 
 `mkbox -r` shows `SOURCES.md`'s entries at the top of the **Exploits / scripts** section, ahead of the plain file list (`SOURCES.md` itself is left out of that list, since its content is already shown above it). If you never run `addexploit`, the section is unchanged from before: just the files in `exploits/`, oldest first.
 
+**Exploit code in the report.** The exam guide wants the *modified* exploit's code in the report with your changes highlighted (an exploit you used as-is is just its URL), and any scripts or PoCs of your own as text. So `mkbox -r` now prints the code of every file in `exploits/` that is:
+
+- recorded by `addexploit` **with** a change note, or carries change markers: printed in full, plus a **Highlighted changes** list of the regions you marked, with line numbers;
+- not recorded by `addexploit` at all (your own script): printed in full;
+- recorded by `addexploit` **without** a change note: not printed, only listed with its URL. Binary files are never printed, and a file over 5000 lines is replaced by a note to include the relevant part by hand.
+
+To mark your changes, run `markchanges <file>` in the box shell. It shows a numbered preview, then opens the file in `$EDITOR`; wrap each region you changed in two comment lines using the file's own comment syntax:
+
+```
+# mkbox:change
+LHOST = "10.10.14.5"
+LPORT = 4444
+# mkbox:end
+```
+
+The marker lines are left out of the printed code, and the whole file is printed (not just the marked parts) because the guide asks for the modified code itself. Only what's between the markers is called out as your change, so mark everything you touched. If a modified exploit has no marked changes, or the markers don't pair up, `mkbox -r` warns and `--final` refuses to export.
+
 ### The chronological log
 
 The **Timeline** section merges four sources by time:
@@ -545,7 +566,7 @@ Pass `--creds` to include `creds/creds.txt` for every box, same as `mkbox -r --c
 **Converting to ODT.** Pass `--odt` and `mkbox -a` also produces `<outfile>.odt` - a real document, not just differently-styled Markdown:
 
 ```
-mkbox -a draft.md --odt --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02 filesrv03
+mkbox -a draft.md --odt --author="Jane Q. Tester" --osid=OS-12345 lame dc01 dc02 filesrv03
 ```
 
 By default (no `=path`, and `$MKBOX_ODT_TEMPLATE` unset) this uses mkbox's own bundled template (`templates/mkbox-default.odt`, shipped alongside the script), which needs nothing from you and gives you, entirely deterministically:
@@ -564,7 +585,7 @@ This is why the OffSec exam guide's note on reporting flexibility (any reasonabl
 **Exporting straight to PDF.** OSCP submission wants a PDF anyway, and the one manual step `--odt` still leaves you - opening the file and doing Tools > Update All so the Table of Contents actually has page numbers - is exactly what `--pdf` automates:
 
 ```
-mkbox -a draft.md --pdf --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02 filesrv03
+mkbox -a draft.md --pdf --author="Jane Q. Tester" --osid=OS-12345 lame dc01 dc02 filesrv03
 ```
 
 `--pdf` implies `--odt` (so you still get both `draft.odt` and `draft.pdf`), then drives a throwaway, invisible LibreOffice instance over its own UNO scripting interface to do what you'd otherwise do by hand: open the ODT, update every index (which is what actually computes real page numbers), resave it, and export the PDF from that updated copy - so the TOC in `draft.pdf` is already correct, not frozen at "no page computed yet". It uses its own LibreOffice profile and a random port each run, so it won't conflict with a LibreOffice window you already have open.
@@ -574,10 +595,18 @@ This needs `soffice` (LibreOffice itself) and a `python3` with its `uno` module 
 **A hard stop before you submit: `--final`.** `--pdf` on its own is happy to build a PDF with `TODO` stubs still in it (it only warns). Add `--final` for the real export:
 
 ```
-mkbox -a draft.md --final --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02 filesrv03
+mkbox -a draft.md --final --author="Jane Q. Tester" --osid=OS-12345 lame dc01 dc02 filesrv03
 ```
 
-If the High-Level Summary, Recommendations or Methodology is still unwritten, or any `addvuln` finding is still the blank template, `mkbox` lists what's missing, writes the Markdown draft as usual, but **does not build the ODT/PDF** and exits non-zero. It also exits non-zero if the PDF itself couldn't be produced (no LibreOffice), instead of quietly falling back to an ODT. `--final` on its own implies `--pdf`; with `--odt` it only does the unwritten-sections check. In the box shell, `assemble --final` does the same; it is never remembered between runs, so a plain `assemble` stays a no-fuss work-in-progress rebuild.
+If the High-Level Summary, Recommendations or Methodology is still unwritten, any `addvuln` finding is still the blank template, or a modified exploit has no marked changes, `mkbox` lists what's missing, writes the Markdown draft as usual, but **does not build the ODT/PDF** and exits non-zero. It also exits non-zero if the PDF itself couldn't be produced (no LibreOffice), instead of quietly falling back to an ODT. `--final` on its own implies `--pdf`; with `--odt` it only does the unwritten-sections check. In the box shell, `assemble --final` does the same; it is never remembered between runs, so a plain `assemble` stays a no-fuss work-in-progress rebuild.
+
+**Packaging for upload: `--submit`.** The exam guide wants a PDF named exactly `OSCP-OS-XXXXX-Exam-Report.pdf`, inside an unencrypted `OSCP-OS-XXXXX-Exam-Report.7z` (nothing else in it, at most 200MB), uploaded to upload.offsec.com with the MD5 checked against the one the site shows. `--submit` does all of that after the `--final` checks pass:
+
+```
+mkbox -a report.md --submit --osid=OS-12345 lame dc01 dc02 filesrv03
+```
+
+It writes both files next to `report.md`, then prints the archive's MD5 to compare. The OSID is required (`--osid`, or `$MKBOX_OSID`) and is accepted as `OS-12345`, `OS12345` or `os-12345`; the file names always use `OS-12345`. It needs `7z` (`sudo apt install p7zip-full`), refuses an archive over 200MB, and rebuilds the `.7z` from scratch every time. In the box shell, `assemble --submit` works the same way and is never remembered between runs. Read the PDF through before you upload it: a submission is final.
 
 ### Writing the sections only you can write
 

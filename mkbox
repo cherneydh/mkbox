@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-VERSION="1.5.0"
+VERSION="1.5.1"
 
 # Where mkbox itself lives, so it can find its bundled templates/ (see --odt) regardless of which
 # directory it was invoked from or whether $0 is a symlink.
@@ -70,7 +70,7 @@ usage() {
 Usage: mkbox [-n|--no-shell] <boxname|path> [target-ip] [--ad]
        mkbox -c|--clean  <boxname|path>
        mkbox -r|--report [--creds] <boxname|path>
-       mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS12345] [--title="Text"] [--final] [--creds] <box1> [box2 ...]
+       mkbox -a|--assemble <outfile.md> [--odt[=template.odt]|--pdf] [--author="Name"] [--osid=OS-12345] [--title="Text"] [--final|--submit] [--creds] <box1> [box2 ...]
        mkbox -p|--pad <boxname|path|-g> [edit|add TEXT|cmd CMD|show|grep PAT|path]
        mkbox -l|--list
        mkbox -t|--text [summary|recommendations|methodology|status]
@@ -751,6 +751,110 @@ demote_headings() {
   '
 }
 
+# --- modified exploit code in the report ------------------------------------------------------------
+# The OSCP exam guide wants a modified exploit's code in the report itself, with the changes highlighted
+# and a link to the original; an exploit used as-is is just its URL. exploit_kind sorts each file in
+# exploits/ into: asis (recorded by addexploit as unmodified - URL only, never inlined), modified
+# (addexploit recorded a change, or the file carries mkbox:change markers) or own (not in SOURCES.md at
+# all: your own script or PoC, which the guide also wants as text). Wrap the lines you changed in two
+# comment lines containing "mkbox:change" and "mkbox:end" (the box shell's `markchanges` helps); the
+# marker lines are dropped from the printed code, and each marked region is listed again, with its line
+# numbers, under "Highlighted changes".
+exploit_kind() {
+  local dir="$1" f="$2" mod
+  if grep -q 'mkbox:change' "$dir/$f" 2>/dev/null; then echo modified; return 0; fi
+  if [[ ! -s "$dir/SOURCES.md" ]]; then echo own; return 0; fi
+  mod="$(awk -v f="\`$f\`" '
+    /^- \*\*/ { hit = (index($0, f) > 0); if (hit) { seen = 1; m = "" }; next }
+    hit && /^  - Modified: / { m = $0; sub(/^  - Modified: /, "", m) }
+    END { if (!seen) print "-"; else print "=" tolower(m) }
+  ' "$dir/SOURCES.md")"
+  case "$mod" in
+    -)                                      echo own ;;
+    "=no"|"=no,"*|"=none"*|"=no change"*)   echo asis ;;
+    *)                                      echo modified ;;
+  esac
+}
+
+# exploit_clean <file>: the file's text without its marker lines. A line starting with three backticks
+# gets a leading space, so it can't close the report's own code fence early.
+exploit_clean() {
+  awk '
+    /mkbox:(change|end)/ { next }
+    /^```/ { print " " $0; next }
+    { print }
+  ' "$1"
+}
+
+# exploit_regions <file>: "<first> <last>" per marked region, numbered as in exploit_clean's output;
+# prints BAD as well if the markers don't pair up.
+exploit_regions() {
+  awk '
+    /mkbox:change/ { if (open) bad = 1; open = 1; start = n + 1; next }
+    /mkbox:end/    { if (!open) { bad = 1; next } open = 0; if (n >= start) print start, n; next }
+    { n++ }
+    END { if (open || bad) print "BAD" }
+  ' "$1"
+}
+
+# exploit_inline <exploits_dir>: the code of every modified exploit / own script, as markdown.
+exploit_inline() {
+  local dir="$1" f kind code regions a b label
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    grep -Iq . "$dir/$f" 2>/dev/null || continue            # empty or binary: nothing to print
+    kind="$(exploit_kind "$dir" "$f")"
+    if [[ "$kind" == asis ]]; then continue; fi
+    if [[ "$kind" == own ]]; then label="your script"; else label="modified exploit code"; fi
+    echo "### $f ($label)"
+    echo
+    if [[ "$(wc -l < "$dir/$f")" -gt 5000 ]]; then
+      echo "_Over 5000 lines - not inlined; include the relevant part by hand._"
+      echo
+      continue
+    fi
+    code="$(exploit_clean "$dir/$f")"
+    printf '%s\n' '```'
+    printf '%s\n' "$code"
+    printf '%s\n' '```'
+    echo
+    regions="$(exploit_regions "$dir/$f")"
+    if [[ -n "${regions//BAD/}" ]]; then
+      echo "Highlighted changes (line numbers refer to the listing above):"
+      echo
+      while read -r a b; do
+        if [[ "$a" == BAD ]]; then continue; fi
+        if [[ "$a" == "$b" ]]; then echo "**Line $a**"; else echo "**Lines $a-$b**"; fi
+        echo
+        printf '%s\n' '```'
+        printf '%s\n' "$code" | sed -n "${a},${b}p"
+        printf '%s\n' '```'
+        echo
+      done <<<"$regions"
+    elif [[ "$kind" == modified ]]; then
+      echo "_No changed regions marked yet - in the box shell, run \`markchanges $f\` to highlight what you changed._"
+      echo
+    fi
+  done < <(files_by_mtime "$dir" ! -name 'SOURCES.md')
+}
+
+# exploit_warnings <exploits_dir>: WARNING lines for modified exploits whose changes aren't (properly) marked.
+exploit_warnings() {
+  local dir="$1" f kind regions
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    grep -Iq . "$dir/$f" 2>/dev/null || continue
+    kind="$(exploit_kind "$dir" "$f")"
+    if [[ "$kind" == asis ]]; then continue; fi
+    regions="$(exploit_regions "$dir/$f")"
+    if [[ "$regions" == *BAD* ]]; then
+      echo "WARNING: exploit file $f has mkbox:change / mkbox:end markers that don't pair up (fix them: markchanges $f)"
+    elif [[ "$kind" == modified && -z "$regions" ]]; then
+      echo "WARNING: exploit file $f is recorded as modified but none of its changes are marked, so the report can't highlight them (run: markchanges $f)"
+    fi
+  done < <(files_by_mtime "$dir" ! -name 'SOURCES.md')
+}
+
 # demote_part_headings: stdin -> stdout, for text you wrote in report-parts/. The section's own
 # heading ("# High-Level Summary") is level 1 and "## Tools Used" follows it, so a "# Foo" you type
 # inside would otherwise become a second top-level heading and shift every number after it. Pushes any
@@ -999,6 +1103,49 @@ _assemble_export_pdf() {
   return 0
 }
 
+# _norm_osid <osid>: prints the OSID the way OffSec writes it in file names ("OS-12345"); fails if it
+# doesn't look like one. Accepts OS12345, os-12345, OS-12345.
+_norm_osid() {
+  if [[ "$1" =~ ^[Oo][Ss]-?([0-9]+)$ ]]; then printf 'OS-%s\n' "${BASH_REMATCH[1]}"; else return 1; fi
+}
+
+# _assemble_submit <pdffile> <normalized-osid>: the exam guide's submission format - the report PDF as
+# OSCP-OS-XXXXX-Exam-Report.pdf, inside an unencrypted OSCP-OS-XXXXX-Exam-Report.7z (nothing else in it,
+# at most 200MB) - plus the archive's MD5 to compare with the one upload.offsec.com shows.
+_assemble_submit() {
+  local pdffile="$1" osid="$2" dir base sz cand size md5 limit=209715200
+  dir="$(dirname -- "$pdffile")"
+  base="OSCP-$osid-Exam-Report"
+  sz=""
+  for cand in 7z 7zz 7za 7zr; do
+    if command -v "$cand" >/dev/null 2>&1; then sz="$cand"; break; fi
+  done
+  if [[ -z "$sz" ]]; then
+    echo "mkbox: --submit needs 7-Zip to build the .7z (sudo apt install p7zip-full) - the PDF is at $pdffile" >&2
+    return 1
+  fi
+  if [[ "$(readlink -f -- "$pdffile")" != "$(readlink -f -- "$dir/$base.pdf")" ]]; then
+    cp -f -- "$pdffile" "$dir/$base.pdf" || { echo "mkbox: --submit: couldn't write $dir/$base.pdf" >&2; return 1; }
+  fi
+  rm -f -- "$dir/$base.7z"                                   # a fresh archive, never an update of an old one
+  if ! ( cd -- "$dir" && "$sz" a "$base.7z" "$base.pdf" >/dev/null 2>&1 ) || [[ ! -s "$dir/$base.7z" ]]; then
+    echo "mkbox: --submit: $sz couldn't create $dir/$base.7z" >&2
+    return 1
+  fi
+  size="$(stat -c %s -- "$dir/$base.7z")"
+  if [[ "$size" -gt "$limit" ]]; then
+    echo "mkbox: --submit: $base.7z is $(( size / 1048576 ))MB; the upload limit is 200MB - compress the screenshots and run this again" >&2
+    return 1
+  fi
+  md5="$(md5sum -- "$dir/$base.7z" | awk '{print $1}')"
+  echo "Submission files (in $dir):"
+  echo "  $base.pdf"
+  echo "  $base.7z   ($(( (size + 1048575) / 1048576 ))MB, no password)"
+  echo "  MD5: $md5"
+  echo "Upload the .7z at https://upload.offsec.com, check that the MD5 it shows matches the one above, then click \"Submit File\"."
+  echo "Read the PDF through once first - once submitted, a missing screenshot can't be added."
+}
+
 # assemble_main <with_creds 0|1> <odt 0|1> <odt_template|""> <outfile.md> <box...>: regenerates each
 # listed box's own report, then concatenates them into one document shaped like the official OSCP
 # report template - standalone boxes under "Independent Challenges", boxes marked `setad on` (or
@@ -1079,15 +1226,22 @@ parts_main() {
 }
 
 assemble_main() {
-  local with_creds="$1" odt="$2" odt_tpl="$3" author="$4" pdf="$5" osid="$6" title="${7:-OSCP Exam Report}" final="${8:-0}"; shift 8
+  local with_creds="$1" odt="$2" odt_tpl="$3" author="$4" pdf="$5" osid="$6" title="${7:-OSCP Exam Report}" final="${8:-0}" submit="${9:-0}"; shift 9
   local outfile="${1:-}"
   if [[ -z "$outfile" ]]; then
-    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--title=\"Text\"] [--final] [--creds] <box1> [box2 ...]" >&2
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS-12345] [--title=\"Text\"] [--final|--submit] [--creds] <box1> [box2 ...]" >&2
     return 1
   fi
   shift
+  local osid_norm=""
+  if [[ "$submit" -eq 1 ]]; then
+    osid_norm="$(_norm_osid "$osid")" || {
+      echo "mkbox: --submit needs your OSID to name the files, like --osid=OS-12345 (or set \$MKBOX_OSID)" >&2
+      return 1
+    }
+  fi
   if [[ $# -eq 0 ]]; then
-    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS12345] [--title=\"Text\"] [--final] [--creds] <box1> [box2 ...]" >&2
+    echo "usage: mkbox -a <outfile.md> [--odt[=template.odt]|--pdf] [--author=\"Name\"] [--osid=OS-12345] [--title=\"Text\"] [--final|--submit] [--creds] <box1> [box2 ...]" >&2
     return 1
   fi
 
@@ -1198,14 +1352,17 @@ assemble_main() {
   fi
   # --final: the .md draft above is always written (it is only a draft), but nothing that looks
   # submittable - ODT or PDF - is produced while a section you have to write yourself is still a stub.
-  # Findings still carrying the addvuln template text are just as unfinished, so they stop --final too.
-  local -a unfilled_vulns=()
+  # Findings still carrying the addvuln template text, and modified exploits whose changes aren't
+  # marked, are just as unfinished, so they stop --final too.
+  local -a unfinished=()
   local bw
   for bw in ${box_warnings[@]+"${box_warnings[@]}"}; do
-    if [[ "$bw" == *"unfilled template text"* ]]; then unfilled_vulns+=("$bw"); fi
+    case "$bw" in
+      *"unfilled template text"*|*"WARNING: exploit file"*) unfinished+=("$bw") ;;
+    esac
   done
-  if [[ "$final" -eq 1 && ( ${#todo_sections[@]} -gt 0 || ${#unfilled_vulns[@]} -gt 0 ) ]]; then
-    echo "mkbox: --final: not exporting - ${#todo_sections[@]} section(s) still unwritten, ${#unfilled_vulns[@]} box(es) with unfilled addvuln text (both listed above). Fix them, then run this again." >&2
+  if [[ "$final" -eq 1 && ( ${#todo_sections[@]} -gt 0 || ${#unfinished[@]} -gt 0 ) ]]; then
+    echo "mkbox: --final: not exporting - ${#todo_sections[@]} section(s) still unwritten, ${#unfinished[@]} unfinished finding/exploit warning(s) (all listed above). Fix them, then run this again." >&2
     echo "       Any older .odt/.pdf next to $outfile is from an earlier run and may still have the stubs." >&2
     return 1
   fi
@@ -1290,6 +1447,7 @@ assemble_main() {
         echo "PDF draft:       $pdffile  (table of contents already updated and page numbers computed -"
         echo "                 LibreOffice did that step for you; still worth a final read-through before"
         echo "                 you submit it)"
+        if [[ "$submit" -eq 1 ]]; then _assemble_submit "$pdffile" "$osid_norm" || return 1; fi
       elif [[ "$using_default" -eq 1 ]]; then
         echo "ODT draft:       $odtfile  (cover page, numbered headings and page numbers from mkbox's own"
         echo "                 bundled template; open it and do Tools > Update All once so the Table of"
@@ -1418,6 +1576,7 @@ make_report() {
     echo
     exploit_list "$dir/exploits"
     echo
+    exploit_inline "$dir/exploits"
     echo "## Loot (filenames only)"
     echo
     md_filelist "$dir/loot"
@@ -1472,6 +1631,7 @@ make_report() {
   if [[ ${#unfilled[@]} -gt 0 ]]; then
     echo "WARNING: addvuln entries still have unfilled template text: ${unfilled[*]} (edit them in vulns/ before this goes in your report)"
   fi
+  exploit_warnings "$dir/exploits"
   if [[ "$with_creds" -eq 0 ]]; then
     echo "Left out: the creds/ and loot/ folders (use --creds to include creds/)."
     echo "That only covers those folders. Notes, exploits and the session log are bundled as typed"
@@ -1491,6 +1651,7 @@ fi
 MODE=run
 NO_SHELL=0
 FINAL=0
+SUBMIT=0
 WITH_CREDS=0
 AD_FLAG=0
 ODT=0
@@ -1522,6 +1683,7 @@ while [[ $# -gt 0 ]]; do
     --osid=*)       OSID="${1#--osid=}" ;;
     --title=*)      TITLE="${1#--title=}" ;;
     --final)        FINAL=1 ;;
+    --submit)       SUBMIT=1; FINAL=1; ODT=1; PDF=1 ;;
     -d|--doctor)    MODE=doctor ;;
     -t|--text)      MODE=text ;;
     -h|--help)      usage 0 ;;
@@ -1559,6 +1721,8 @@ doctor() {
   if { command -v python3 >/dev/null 2>&1 && python3 -c 'import uno' >/dev/null 2>&1; } \
      || [[ -x /usr/lib/libreoffice/program/python ]]; then _dr ok "python uno"
   else apt+=(python3-uno); _dr missing "python3 uno    (assemble --pdf: python3-uno)"; fi
+  if command -v 7z >/dev/null 2>&1 || command -v 7zz >/dev/null 2>&1 || command -v 7za >/dev/null 2>&1 || command -v 7zr >/dev/null 2>&1; then _dr ok "7-Zip"
+  else apt+=(p7zip-full); _dr missing "7z            (assemble --submit: p7zip-full)"; fi
   echo "Install:"
   for f in templates/mkbox-default.odt lib/mkbox-update-toc.py; do
     if [[ -f "$MKBOX_SCRIPT_DIR/$f" ]]; then _dr ok "$f"
@@ -1588,7 +1752,7 @@ fi
 if [[ "$MODE" == "assemble" ]]; then
   # --final on its own means "the finished PDF"; with --odt/--pdf already given it only adds the gate
   if [[ "$FINAL" -eq 1 && "$ODT" -eq 0 ]]; then ODT=1; PDF=1; fi
-  assemble_main "$WITH_CREDS" "$ODT" "$ODT_TEMPLATE" "${AUTHOR:-${MKBOX_AUTHOR:-}}" "$PDF" "${OSID:-${MKBOX_OSID:-}}" "${TITLE:-${MKBOX_TITLE:-OSCP Exam Report}}" "$FINAL" "$@"
+  assemble_main "$WITH_CREDS" "$ODT" "$ODT_TEMPLATE" "${AUTHOR:-${MKBOX_AUTHOR:-}}" "$PDF" "${OSID:-${MKBOX_OSID:-}}" "${TITLE:-${MKBOX_TITLE:-OSCP Exam Report}}" "$FINAL" "$SUBMIT" "$@"
   exit $?
 fi
 
@@ -2268,6 +2432,40 @@ report()   { "$MKBOX_BIN" -r "$@" "$BOX_DIR"; }                                 
 boxes() {                                                                                    # lists every box next to this one (same table as mkbox -l) - check what else is in play without leaving this shell
   ( cd -- "$(dirname -- "$BOX_DIR")" 2>/dev/null && "$MKBOX_BIN" -l )
 }
+markchanges() {                                                                              # markchanges <file in exploits/> - preview a modified exploit, then mark the regions you changed; the report highlights them
+  local f="$BOX_DIR/exploits/${1:-}" total opens ends
+  if [ -z "${1:-}" ] || [ ! -f "$f" ]; then
+    echo "usage: markchanges <file in exploits/>      (files there: $(ls "$BOX_DIR/exploits" 2>/dev/null | grep -v '^SOURCES.md$' | tr '\n' ' '))"
+    return 1
+  fi
+  total="$(wc -l < "$f" | tr -d ' ')"
+  echo "--- $1 ($total lines) ---"
+  nl -ba -w4 -s'  ' "$f" | head -n 40
+  if [ "$total" -gt 40 ]; then echo "  ... $((total - 40)) more lines - you'll see them in the editor"; fi
+  cat <<'M'
+
+Next the file opens in your editor. Wrap each region YOU changed in two comment lines, using your
+language's comment syntax:
+
+    # mkbox:change
+    ...the lines you edited or added...
+    # mkbox:end
+
+The report prints the whole file (OffSec wants the modified exploit code itself), drops these marker
+lines from it, and lists every marked region again with its line numbers under "Highlighted changes".
+Only what is between the markers is called out as your change, so mark everything you touched.
+M
+  ${EDITOR:-vi} "$f"
+  opens="$(grep -c 'mkbox:change' "$f" || true)"
+  ends="$(grep -c 'mkbox:end' "$f" || true)"
+  if [ "$opens" -eq 0 ] && [ "$ends" -eq 0 ]; then
+    echo "markchanges: no regions marked in $1 yet."
+  elif [ "$opens" -ne "$ends" ]; then
+    echo "markchanges: $opens mkbox:change but $ends mkbox:end in $1 - they have to pair up. Run markchanges $1 again."
+  else
+    echo "markchanges: $opens region(s) marked in $1."
+  fi
+}
 reporttext() {                                                                               # reporttext [summary|recommendations|methodology|status] - write the report sections only you can write; saved next to the boxes, so assemble never overwrites them
   ( cd -- "$(dirname -- "$BOX_DIR")" 2>/dev/null && "$MKBOX_BIN" --text "$@" )
 }
@@ -2276,7 +2474,7 @@ assemble() {                                                                    
   parent="$(dirname -- "$BOX_DIR")"
   conf="$parent/.mkbox-assemble.conf"
   local -a found=() flags=() given=()
-  local d a want_final=0
+  local d a want_final=0 want_submit=0
   for d in "$parent"/*/; do
     [ -f "${d}box.env" ] && found+=("$(basename -- "${d%/}")")
   done
@@ -2289,10 +2487,15 @@ assemble() {                                                                    
   # Nothing saved yet either: default to --pdf, since that's the single most complete thing this
   # can hand you and it degrades to a plain --odt (or even plainer markdown) on its own if
   # LibreOffice isn't available - never worse than what you'd have gotten by typing nothing.
-  # --final is a one-off gate ("refuse to export while sections are unwritten"), so it is never
-  # saved: a remembered --final would make every later work-in-progress assemble refuse.
+  # --final / --submit are one-offs ("refuse to export while anything is unfinished", "package it for
+  # upload"), so they are never saved: a remembered --final would make every later work-in-progress
+  # assemble refuse.
   for a in "$@"; do
-    if [ "$a" = "--final" ]; then want_final=1; else given+=("$a"); fi
+    case "$a" in
+      --final)  want_final=1 ;;
+      --submit) want_submit=1 ;;
+      *)        given+=("$a") ;;
+    esac
   done
   if [ ${#given[@]} -gt 0 ]; then
     flags=("${given[@]}")
@@ -2303,6 +2506,7 @@ assemble() {                                                                    
     flags=(--pdf)
   fi
   if [ "$want_final" -eq 1 ]; then flags+=(--final); fi
+  if [ "$want_submit" -eq 1 ]; then flags+=(--submit); fi
   out="$parent/report.md"
   echo "Assembling ${#found[@]} box(es) into $out: ${found[*]}"
   ( cd -- "$parent" && "$MKBOX_BIN" -a "$out" "${flags[@]}" "${found[@]}" )
@@ -2314,7 +2518,7 @@ LOCAL="$LHOST"; export LOCAL
 echo "Target: \$IP / \$TARGET = ${IP:-<unset>}"
 echo "Local:  \$LHOST / \$LOCAL = ${LHOST:-<no tun0/tap0>}"
 echo "Dir:    $BOX_DIR"
-echo "Helpers: note pad shot proofshot boxinfo boxcd setip sethost setad portscan udpscan svcscan serve pivot addcred creds addexploit addvuln proofcmd markproof cleanlog report boxes reporttext assemble"
+echo "Helpers: note pad shot proofshot boxinfo boxcd setip sethost setad portscan udpscan svcscan serve pivot addcred creds addexploit markchanges addvuln proofcmd markproof cleanlog report boxes reporttext assemble"
 echo "Proof, in one line: get local.txt/proof.txt on screen -> screenshot it (clipboard) -> proofshot local|proof"
 echo "         (no need to copy the flag text first - that part of proofshot is optional, just for the write-up)"
 echo "Whole report, in one word: assemble   (rebuilds report.md/.odt/.pdf next to this box, from every box next to it too)"

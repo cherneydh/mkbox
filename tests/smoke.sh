@@ -683,6 +683,52 @@ check "setext demotion: '-----' title becomes '### title'"         bash -c "grep
 check "setext demotion: plain paragraphs are left alone"           bash -c "grep -qx 'Body line one' '$PD/report.md' && grep -qx 'Body line two' '$PD/report.md' && grep -qx 'Last paragraph.' '$PD/report.md'"
 check "setext demotion: a standalone '---' rule and a list survive" bash -c "grep -qx -- '- a list item' '$PD/report.md' && grep -qx -- '---' '$PD/report.md'"
 
+# --- modified exploit code in the report, markchanges ------------------------------------------------
+echo "exploit code in the report"
+XD="$T/exploit-run" && rm -rf "$XD" && mkdir -p "$XD" && cp -r "$T/my labs/smoke" "$XD/smoke"
+EXD="$XD/smoke/exploits"
+printf '#!/usr/bin/env python3\nlhost = "10.0.0.1"\nport = 4444\nprint(lhost, port)\n' > "$EXD/cve-2021-9999.py"   # recorded by addexploit as modified
+printf 'print("as is")\n' > "$EXD/plain.py"
+printf 'print("my own tool")\n```\nafter fence\n' > "$EXD/mytool.py"                                              # not in SOURCES.md: your own script
+printf '\177ELF\000\001binary' > "$EXD/payload.bin"
+printf 'addexploit plain.py https://example.com/plain\nexit\n' | ( cd "$XD" && "$MK" smoke > /dev/null 2>&1 )
+"$MK" -r "$XD/smoke" > "$T/exp-r1.out" 2>&1
+XR="$XD/smoke/report/smoke-report.md"
+check "exploit code: a modified exploit is printed in full"            has "$XR" "### cve-2021-9999.py (modified exploit code)"
+check "exploit code: its body is there"                                has "$XR" 'lhost = "10.0.0.1"'
+check "exploit code: unmarked changes get a pointer to markchanges"    has "$XR" "markchanges cve-2021-9999.py"
+check "exploit code: unmarked changes raise a WARNING"                 has "$T/exp-r1.out" "WARNING: exploit file cve-2021-9999.py is recorded as modified"
+check "exploit code: an as-is exploit is not inlined (URL only)"       bash -c "! grep -qF 'print(\"as is\")' '$XR'"
+check "exploit code: ...but is still listed"                           has "$XR" "plain.py"
+check "exploit code: your own script is inlined"                       bash -c "grep -qF '### mytool.py (your script)' '$XR' && grep -qF 'print(\"my own tool\")' '$XR'"
+check "exploit code: a stray code fence in the file can't close the block" bash -c "grep -qx ' \`\`\`' '$XR'"
+check "exploit code: a binary file is not inlined"                     bash -c "! grep -q '### payload.bin' '$XR'"
+cat > "$T/marked-exploit.py" <<'X'
+#!/usr/bin/env python3
+# mkbox:change
+lhost = "10.10.14.5"
+# mkbox:end
+port = 4444
+print(lhost, port)
+X
+EDMARK="$T/fake-marker.sh"
+# shellcheck disable=SC2016  # the editor script must expand "$1" when it runs, not now
+printf '#!/bin/sh\ncp "%s" "$1"\n' "$T/marked-exploit.py" > "$EDMARK" && chmod +x "$EDMARK"
+printf 'markchanges cve-2021-9999.py\nexit\n' | ( cd "$XD" && EDITOR="$EDMARK" "$MK" smoke > "$T/exp-mark.out" 2>&1 )
+check "markchanges: shows a numbered preview first"                    has "$T/exp-mark.out" "1  #!/usr/bin/env python3"
+check "markchanges: explains the markers"                              has "$T/exp-mark.out" "mkbox:change"
+check "markchanges: confirms the marked region"                        has "$T/exp-mark.out" "1 region(s) marked"
+printf 'markchanges nope.py\nexit\n' | ( cd "$XD" && "$MK" smoke > "$T/exp-mark2.out" 2>&1 )
+check "markchanges: unknown file prints usage"                         has "$T/exp-mark2.out" "usage: markchanges"
+printf '# mkbox:change\nx = 1\n' > "$EXD/mytool.py"
+"$MK" -r "$XD/smoke" > "$T/exp-r2.out" 2>&1
+check "exploit code: marked changes are listed under Highlighted changes" has "$XR" "Highlighted changes"
+check "exploit code: ...with their line numbers (markers not counted)" has "$XR" "**Line 2**"
+check "exploit code: marker lines are not printed"                     bash -c "! grep -q 'mkbox:end' '$XR'"
+check "exploit code: marked exploit no longer warns"                   bash -c "! grep -q 'cve-2021-9999.py is recorded' '$T/exp-r2.out'"
+check "exploit code: unbalanced markers raise a WARNING"               has "$T/exp-r2.out" "WARNING: exploit file mytool.py has mkbox:change / mkbox:end markers that don't pair up"
+check "exploit code: warning text reaches assemble (box-prefixed)"     bash -c "cd '$XD' && '$MK' -a r.md smoke 2>&1 | grep -q 'smoke: WARNING: exploit file mytool.py'"
+
 # --final: refuse to export while a section is unwritten
 FD="$T/final-run" && rm -rf "$FD" && mkdir -p "$FD" && cp -r "$T/my labs/smoke" "$FD/smoke" 2>/dev/null
 ( cd "$FD" && "$MK" -a report.md --final smoke > "$T/final1.out" 2>&1 ); FINAL1_RC=$?
@@ -707,12 +753,27 @@ check "--final: that refusal produced no ODT/PDF"                          bash 
 ( cd "$FD" && "$MK" -a report.md smoke unfilled > "$T/final-vuln2.out" 2>&1 ); FINALV2_RC=$?
 check "without --final an unfilled addvuln entry still only warns"         bash -c "[ '$FINALV2_RC' -eq 0 ]"
 rm -rf "$FD/unfilled"
+# a modified exploit (recorded by addexploit) whose changes aren't marked blocks --final as well
+( cd "$FD" && "$MK" -a report.md --final smoke > "$T/final-exp.out" 2>&1 ); FINALE_RC=$?
+check "--final: refuses while a modified exploit has no marked changes"   bash -c "[ '$FINALE_RC' -ne 0 ] && grep -q 'not exporting' '$T/final-exp.out' && grep -q 'WARNING: exploit file cve-2021-9999.py' '$T/final-exp.out'"
+cp "$T/marked-exploit.py" "$FD/smoke/exploits/cve-2021-9999.py"
 if command -v pandoc >/dev/null 2>&1 && PATH="${REALPY_DIR:-}:$PATH" command -v soffice >/dev/null 2>&1 && \
    PATH="${REALPY_DIR:-}:$PATH" python3 -c 'import uno' >/dev/null 2>&1; then
   rm -f "$FD/report.odt" "$FD/report.pdf"
   ( cd "$FD" && PATH="$REALPY_DIR:$PATH" "$MK" -a report.md --final smoke > "$T/final4.out" 2>&1 ); FINAL4_RC=$?
   check "--final, everything written: exits 0"                     bash -c "[ '$FINAL4_RC' -eq 0 ]"
   check "--final, everything written: --final alone implies --pdf" bash -c "[ -s '$FD/report.pdf' ] && [ -s '$FD/report.odt' ]"
+  # --submit: OffSec's file names, a .7z with nothing but the PDF, and the MD5 to compare (7z is stubbed:
+  # copies the file to the archive name, which is all this checks)
+  # shellcheck disable=SC2016  # the stub script must expand its arguments when it runs, not now
+  printf '#!/usr/bin/env bash\n[ "$1" = a ] && cp -- "$3" "$2"\n' > "$T/bin/7z"; chmod +x "$T/bin/7z"
+  ( cd "$FD" && PATH="$REALPY_DIR:$PATH" "$MK" -a report.md --submit --osid=OS12345 smoke > "$T/submit1.out" 2>&1 ); SUBMIT1_RC=$?
+  rm -f "$T/bin/7z"
+  check "--submit: exits 0"                                          bash -c "[ '$SUBMIT1_RC' -eq 0 ]"
+  check "--submit: writes OSCP-OS-12345-Exam-Report.pdf (OSID normalized)" bash -c "[ -s '$FD/OSCP-OS-12345-Exam-Report.pdf' ]"
+  check "--submit: writes OSCP-OS-12345-Exam-Report.7z"              bash -c "[ -s '$FD/OSCP-OS-12345-Exam-Report.7z' ]"
+  check "--submit: prints the archive's MD5"                         bash -c "grep -q \"MD5: \$(md5sum '$FD/OSCP-OS-12345-Exam-Report.7z' | awk '{print \$1}')\" '$T/submit1.out'"
+  check "--submit: points at the upload site"                        has "$T/submit1.out" "upload.offsec.com"
 else
   skipped "--final export checks (needs pandoc, LibreOffice and uno)"
 fi
@@ -728,12 +789,22 @@ if command -v pandoc >/dev/null 2>&1; then
   check "--final: a failed PDF export is a failure, not a quiet ODT fallback" bash -c "[ '$FINAL6_RC' -ne 0 ] && grep -q 'no PDF was produced' '$T/final6.out'"
 fi
 
+# --submit needs an OSID it can turn into OS-12345, and refuses before building anything without one
+rm -f "$FD/x.md"
+( cd "$FD" && env -u MKBOX_OSID "$MK" -a x.md --submit smoke > "$T/submit2.out" 2>&1 ); SUBMIT2_RC=$?
+check "--submit: refuses without an OSID"                          bash -c "[ '$SUBMIT2_RC' -ne 0 ] && grep -q 'needs your OSID' '$T/submit2.out' && [ ! -e '$FD/x.md' ]"
+( cd "$FD" && "$MK" -a x.md --submit --osid=banana smoke > "$T/submit3.out" 2>&1 ); SUBMIT3_RC=$?
+check "--submit: refuses an OSID that isn't OS-12345-shaped"       bash -c "[ '$SUBMIT3_RC' -ne 0 ] && grep -q 'needs your OSID' '$T/submit3.out'"
+check "--submit: usage mentions the flag"                          bash -c "'$MK' -h 2>&1 | grep -q -- '--submit'"
+
 # in-shell: assemble --final never gets remembered for later bare assembles
 rm -f "$T/my labs/.mkbox-assemble.conf" "$T/my labs/report.md" "$T/my labs/report.odt" "$T/my labs/report.pdf"
 rm -rf "$T/my labs/report-parts"
 printf '%s\n' 'assemble --odt' 'assemble --final' 'exit' | "$MK" smoke > "$T/shellfinal.out" 2>&1
 check "assemble --final (in-shell): refuses while sections are unwritten" has "$T/shellfinal.out" "not exporting"
 check "assemble --final (in-shell): not saved to the remembered flags"    bash -c "! grep -q -- '--final' '$T/my labs/.mkbox-assemble.conf' && grep -q -- '--odt' '$T/my labs/.mkbox-assemble.conf'"
+printf '%s\n' 'assemble --submit' 'exit' | env -u MKBOX_OSID "$MK" smoke > "$T/shellsubmit.out" 2>&1
+check "assemble --submit (in-shell): runs, and is not saved either"       bash -c "grep -q 'needs your OSID' '$T/shellsubmit.out' && ! grep -q -- '--submit' '$T/my labs/.mkbox-assemble.conf'"
 rm -f "$T/my labs/.mkbox-assemble.conf" "$T/my labs/report.md" "$T/my labs/report.odt" "$T/my labs/report.pdf"
 
 # --- re-entering vs typos -----------------------------------------------------------------------
