@@ -754,13 +754,19 @@ demote_headings() {
 # demote_part_headings: stdin -> stdout, for text you wrote in report-parts/. The section's own
 # heading ("# High-Level Summary") is level 1 and "## Tools Used" follows it, so a "# Foo" you type
 # inside would otherwise become a second top-level heading and shift every number after it. Pushes any
-# ATX heading down one level ("#" -> "##"), and turns anything that would land below level 3 (the
-# deepest level the report template defines) into a bold line. Lines inside ``` / ~~~ fences are left
-# alone, so a "# comment" in a pasted code block survives untouched.
+# heading down one level ("#" -> "##"), and turns anything that would land below level 3 (the deepest
+# level the report template defines) into a bold line. Underlined headings ("Title" over "=====" or
+# "-----", which pandoc also reads as headings) become "## Title" / "### Title". Lines inside
+# ``` / ~~~ fences are left alone, so a "# comment" in a pasted code block survives untouched.
 demote_part_headings() {
   awk '
-    /^(```|~~~)/ { infence = !infence; print; next }
+    function flush() { if (have) { print prev; have = 0 } }
+    /^(```|~~~)/ { flush(); infence = !infence; print; lastblank = 0; next }
     infence { print; next }
+    have && /^=+[ \t]*$/ { print "## " prev; have = 0; lastblank = 0; next }
+    have && /^-+[ \t]*$/ { print "### " prev; have = 0; lastblank = 0; next }
+    { flush() }
+    BEGIN { lastblank = 1 }
     /^#+[ \t]/ {
       match($0, /^#+/)
       lvl = RLENGTH + 1
@@ -768,9 +774,14 @@ demote_part_headings() {
       sub(/^[ \t]+/, "", rest)
       if (lvl > 3) { print "**" rest "**" }
       else { print substr($0, 1, RLENGTH) "# " rest }
+      lastblank = 0
       next
     }
-    { print }
+    # a possible setext title: a plain one-line paragraph start (blank line before it), held back
+    # one line to see whether an underline follows
+    lastblank && /[^ \t]/ && !/^([-*+>|]|[0-9]+[.)])/ && !/^    / { prev = $0; sub(/^[ \t]+/, "", prev); have = 1; lastblank = 0; next }
+    { print; lastblank = ($0 !~ /[^ \t]/) }
+    END { flush() }
   '
 }
 
@@ -1187,9 +1198,15 @@ assemble_main() {
   fi
   # --final: the .md draft above is always written (it is only a draft), but nothing that looks
   # submittable - ODT or PDF - is produced while a section you have to write yourself is still a stub.
-  if [[ "$final" -eq 1 && ${#todo_sections[@]} -gt 0 ]]; then
-    echo "mkbox: --final: not exporting - ${#todo_sections[@]} section(s) still unwritten (listed above). Write them, then run this again." >&2
-    echo "       Any older .odt/.pdf next to $outfile is from an earlier run and still has the stubs." >&2
+  # Findings still carrying the addvuln template text are just as unfinished, so they stop --final too.
+  local -a unfilled_vulns=()
+  local bw
+  for bw in ${box_warnings[@]+"${box_warnings[@]}"}; do
+    if [[ "$bw" == *"unfilled template text"* ]]; then unfilled_vulns+=("$bw"); fi
+  done
+  if [[ "$final" -eq 1 && ( ${#todo_sections[@]} -gt 0 || ${#unfilled_vulns[@]} -gt 0 ) ]]; then
+    echo "mkbox: --final: not exporting - ${#todo_sections[@]} section(s) still unwritten, ${#unfilled_vulns[@]} box(es) with unfilled addvuln text (both listed above). Fix them, then run this again." >&2
+    echo "       Any older .odt/.pdf next to $outfile is from an earlier run and may still have the stubs." >&2
     return 1
   fi
 

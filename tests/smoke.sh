@@ -675,6 +675,13 @@ check "heading demotion: your file on disk is not rewritten"      has "$PD/repor
 printf 'Plain text only.\n' > "$PD/report-parts/methodology.md"
 ( cd "$PD" && "$MK" -a report.md smoke > "$T/parts-asm5.out" 2>&1 )
 check "heading demotion: no note when there was nothing to demote" bash -c "! grep -q 'pushed down a level' '$T/parts-asm5.out'"
+# underlined (setext) headings are headings to pandoc too; ordinary text and rules must survive untouched
+printf 'Underlined one\n==============\n\nBody line one\nBody line two\n\nUnderlined two\n--------------\n\n- a list item\n\n---\n\nLast paragraph.\n' > "$PD/report-parts/methodology.md"
+( cd "$PD" && "$MK" -a report.md smoke > "$T/parts-asm6.out" 2>&1 )
+check "setext demotion: '=====' title becomes '## title'"          bash -c "grep -qx '## Underlined one' '$PD/report.md' && ! grep -q '^=====' '$PD/report.md'"
+check "setext demotion: '-----' title becomes '### title'"         bash -c "grep -qx '### Underlined two' '$PD/report.md'"
+check "setext demotion: plain paragraphs are left alone"           bash -c "grep -qx 'Body line one' '$PD/report.md' && grep -qx 'Body line two' '$PD/report.md' && grep -qx 'Last paragraph.' '$PD/report.md'"
+check "setext demotion: a standalone '---' rule and a list survive" bash -c "grep -qx -- '- a list item' '$PD/report.md' && grep -qx -- '---' '$PD/report.md'"
 
 # --final: refuse to export while a section is unwritten
 FD="$T/final-run" && rm -rf "$FD" && mkdir -p "$FD" && cp -r "$T/my labs/smoke" "$FD/smoke" 2>/dev/null
@@ -692,6 +699,14 @@ check "--final with --odt is gated the same way"                   bash -c "[ '$
 check "without --final the same TODOs still only warn"             bash -c "[ '$FINAL3_RC' -eq 0 ]"
 mkdir -p "$FD/report-parts"
 for part in summary recommendations methodology; do printf 'Written.\n' > "$FD/report-parts/$part.md"; done
+# every section is written, but a box still has an addvuln entry left as the blank template: still refused
+cp -r "$T/my labs/unfilled" "$FD/unfilled"
+( cd "$FD" && "$MK" -a report.md --final smoke unfilled > "$T/final-vuln.out" 2>&1 ); FINALV_RC=$?
+check "--final: refuses while an addvuln entry is still the blank template" bash -c "[ '$FINALV_RC' -ne 0 ] && grep -q 'not exporting' '$T/final-vuln.out' && grep -q 'unfilled template text' '$T/final-vuln.out'"
+check "--final: that refusal produced no ODT/PDF"                          bash -c "[ ! -e '$FD/report.odt' ] && [ ! -e '$FD/report.pdf' ]"
+( cd "$FD" && "$MK" -a report.md smoke unfilled > "$T/final-vuln2.out" 2>&1 ); FINALV2_RC=$?
+check "without --final an unfilled addvuln entry still only warns"         bash -c "[ '$FINALV2_RC' -eq 0 ]"
+rm -rf "$FD/unfilled"
 if command -v pandoc >/dev/null 2>&1 && PATH="${REALPY_DIR:-}:$PATH" command -v soffice >/dev/null 2>&1 && \
    PATH="${REALPY_DIR:-}:$PATH" python3 -c 'import uno' >/dev/null 2>&1; then
   rm -f "$FD/report.odt" "$FD/report.pdf"

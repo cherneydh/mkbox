@@ -551,7 +551,7 @@ This needs `soffice` (LibreOffice itself) and a `python3` with its `uno` module 
 mkbox -a draft.md --final --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02 filesrv03
 ```
 
-If the High-Level Summary, Recommendations or Methodology is still unwritten, `mkbox` lists what's missing, writes the Markdown draft as usual, but **does not build the ODT/PDF** and exits non-zero. It also exits non-zero if the PDF itself couldn't be produced (no LibreOffice), instead of quietly falling back to an ODT. `--final` on its own implies `--pdf`; with `--odt` it only does the unwritten-sections check. In the box shell, `assemble --final` does the same; it is never remembered between runs, so a plain `assemble` stays a no-fuss work-in-progress rebuild.
+If the High-Level Summary, Recommendations or Methodology is still unwritten, or any `addvuln` finding is still the blank template, `mkbox` lists what's missing, writes the Markdown draft as usual, but **does not build the ODT/PDF** and exits non-zero. It also exits non-zero if the PDF itself couldn't be produced (no LibreOffice), instead of quietly falling back to an ODT. `--final` on its own implies `--pdf`; with `--odt` it only does the unwritten-sections check. In the box shell, `assemble --final` does the same; it is never remembered between runs, so a plain `assemble` stays a no-fuss work-in-progress rebuild.
 
 ### Writing the sections only you can write
 
@@ -568,7 +568,7 @@ assemble                      # pulls them in; lists whatever is still a TODO st
 Outside the shell the same thing is `mkbox --text [section]`, run from the directory your boxes (and `report.md`) live in.
 
 - **They live in `report-parts/` next to the assembled report** (`summary.md`, `recommendations.md`, `methodology.md`), not inside `report.md`, so rebuilding the report - which regenerates `report.md` from the boxes every time - never overwrites your writing.
-- **Write plain paragraphs and lists, and skip `#` headings** - `mkbox` adds the section heading itself. If you use one anyway, it is pushed down a level (`#` becomes `##`, and anything deeper than the report's third level becomes a bold line) so it can't disturb the heading numbering; `#` lines inside code fences are left alone, and `assemble` tells you when it demoted something. The guidance comment at the top of each new file is ignored; you can leave it or delete it. A file that's empty or still starts with `TODO` counts as unwritten.
+- **Write plain paragraphs and lists, and skip `#` headings** - `mkbox` adds the section heading itself. If you use one anyway (including the underlined `Title` over `=====` style), it is pushed down a level (`#` becomes `##`, and anything deeper than the report's third level becomes a bold line) so it can't disturb the heading numbering; `#` lines inside code fences are left alone, and `assemble` tells you when it demoted something. The guidance comment at the top of each new file is ignored; you can leave it or delete it. A file that's empty or still starts with `TODO` counts as unwritten.
 - **Every `assemble` ends with a checklist** of whatever is still unwritten, with the exact command for each, so you find out before the PDF rather than after.
 - The `Tools Used` subsection under `Methodology` is added automatically after your text.
 
