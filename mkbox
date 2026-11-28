@@ -2433,9 +2433,12 @@ boxes() {                                                                       
   ( cd -- "$(dirname -- "$BOX_DIR")" 2>/dev/null && "$MKBOX_BIN" -l )
 }
 markchanges() {                                                                              # markchanges <file in exploits/> - preview a modified exploit, then mark the regions you changed; the report highlights them
-  local f="$BOX_DIR/exploits/${1:-}" total opens ends
+  local f="$BOX_DIR/exploits/${1:-}" total opens ends x list=""
   if [ -z "${1:-}" ] || [ ! -f "$f" ]; then
-    echo "usage: markchanges <file in exploits/>      (files there: $(ls "$BOX_DIR/exploits" 2>/dev/null | grep -v '^SOURCES.md$' | tr '\n' ' '))"
+    for x in "$BOX_DIR"/exploits/*; do
+      if [ -f "$x" ] && [ "${x##*/}" != SOURCES.md ]; then list="$list ${x##*/}"; fi
+    done
+    echo "usage: markchanges <file in exploits/>      (files there:${list:- none})"
     return 1
   fi
   total="$(wc -l < "$f" | tr -d ' ')"
