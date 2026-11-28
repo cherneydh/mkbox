@@ -52,21 +52,47 @@ On Debian/Kali: `sudo apt install nmap xclip pandoc libreoffice-writer python3-u
 
 ## Quick start
 
+A whole box, start to finish. Everything below `mkbox lame ...` is typed inside the box shell it opens; each helper is covered in detail further down.
+
 ```
 cd ~/oscp/htb
-mkbox lame 10.10.10.3        # create ./lame, enter it, start logging
+mkbox lame 10.10.10.3         # create ./lame, enter it, start logging (re-run it in other tabs: all share state)
 
-# inside the box shell
-portscan                     # all-TCP-ports nmap sweep, saved to nmap/
-svcscan                      # default scripts + versions on the open ports
-udpscan                      # top-20 UDP ports (slow; try a second tab)
-note "anonymous FTP allowed" # timestamped timeline entry
-addcred bob:hunter2 "ssh"    # record a credential
-markproof local 3f2a...      # tick local.txt in the proof checklist (and store the flag)
-exit                         # leave; the session log is cleaned automatically
+# --- recon
+portscan                      # all-TCP-ports nmap sweep, saved to nmap/ (sets $PORTS)
+svcscan                       # default scripts + versions on the open ports
+udpscan                       # top-20 UDP ports (slow; try a second tab)
+sethost lame.htb              # box only answers to a hostname? adds the /etc/hosts line
 
-mkbox -r lame                # build a report draft + evidence tarball
+# --- while you work
+note "anonymous FTP allowed"  # timestamped timeline entry
+pad                           # scratchpad: free-form notes/commands, never part of the report
+serve                         # serve transfer/ over HTTP (or --smb / --webdav), prints the client commands
+addexploit 50064.py https://www.exploit-db.com/exploits/50064 "changed LHOST"   # file in exploits/, with its source
+addcred bob:hunter2 "ssh"     # record a credential (creds N prints ready-to-paste commands for it)
+
+# --- evidence
+shot "anonymous FTP login"    # save the image on your clipboard as a captioned screenshot
+addvuln initial "vsftpd 2.3.4 backdoor" critical    # a finding for the report (initial | privesc | post)
+proofcmd                      # proof one-liners to paste on the target
+proofshot local               # screenshot + tick local.txt in the proof checklist, in one step
+pivot DC01 "psexec with bob"  # Active Directory: log a lateral move (shown as a chain in the report)
+exit                          # leave; the session log is cleaned automatically
+
+mkbox -r lame                 # build this box's report draft + evidence tarball
 ```
+
+**Several boxes, one report.** Mark Active Directory machines (`mkbox dc01 10.10.10.5 --ad`, or `setad on` inside a box), then from inside any box's shell:
+
+```
+boxes                         # every box next to this one, with target IP and proof status
+reporttext                    # the three sections only you can write; which are done, which are TODO
+reporttext summary            # opens it in $EDITOR (also: recommendations, methodology)
+assemble                      # rebuild the WHOLE report (report.md/.odt/.pdf) from every box; lists what's missing
+assemble --final              # the submit-it export: refuses while a section or finding is still unfinished
+```
+
+Or in one go from a plain terminal: `mkbox -a report.md --final --author="Jane Q. Tester" --osid=OS12345 lame dc01 dc02`. Run `mkbox --doctor` any time to check what's installed.
 
 ## Commands
 

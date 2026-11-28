@@ -24,6 +24,12 @@ A hardening pass on the report pipeline: a hard stop before export, and the gaps
   are left alone; underlined headings (`Title` over `=====` / `-----`) get the same treatment; your files on disk are never rewritten; and `assemble` prints a note saying which
   section it adjusted. The guidance comment in new section files now says so too.
 
+### Changed
+
+- **README Quick start** now walks a whole engagement (recon, notes, `serve`, `addexploit`, `shot`,
+  `addvuln`, `proofshot`, `pivot`, then multi-box `reporttext` / `assemble --final`) instead of a
+  handful of commands, so the features aren't missed by someone skimming.
+
 ### Internal
 
 - **CI now exercises the PDF path.** The workflow installs `libreoffice-writer`, `python3-uno` and
