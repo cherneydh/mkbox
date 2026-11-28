@@ -849,6 +849,15 @@ check "exclude: tarball keeps real files"       bash -c "tar -tzf '$XT' | grep -
 check "exclude: tarball drops venvs and ignores" bash -c "! tar -tzf '$XT' | grep -E 'dep.py|act.py|i.js|lib.py|out.py'"
 MKBOX_EXCLUDE='mine.py' "$MK" -r exc > /dev/null 2>&1
 check "exclude: \$MKBOX_EXCLUDE adds patterns"  bash -c "! grep -q 'mine.py' '$XR'"
+check "exclude: new box gets a starter .mkboxignore" test -f exc/.mkboxignore
+rm -f exc/.mkboxignore
+"$MK" -n exc > /dev/null 2>&1
+check "exclude: re-entering an old box adds the starter file" test -f exc/.mkboxignore
+echo "mine" > exc/.mkboxignore
+"$MK" -n exc > /dev/null 2>&1
+check "exclude: an existing .mkboxignore is left alone" bash -c "[ \"\$(cat exc/.mkboxignore)\" = mine ]"
+rm -f exc/.mkboxignore; "$MK" -r exc > /dev/null 2>&1
+check "exclude: -r on an old box adds the starter file" test -f exc/.mkboxignore
 rm -rf exc
 
 echo

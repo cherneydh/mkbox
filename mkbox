@@ -429,6 +429,24 @@ exclude_patterns() {
   done < <(find "$d" -maxdepth 4 -name pyvenv.cfg -type f 2>/dev/null)
 }
 
+# ensure_ignore_file <box_dir>: give a box a starter .mkboxignore if it has none, so boxes made by older
+# versions pick up the venv/clutter exclusions (see exclude_patterns) and have a file to edit. The built-in
+# defaults apply with or without it; an existing file is never touched.
+ensure_ignore_file() {
+  local f="$1/.mkboxignore"
+  [[ -e "$f" ]] && return 0
+  cat > "$f" <<'IGN' 2>/dev/null || return 0
+# mkbox: paths left out of the report and evidence tarball (one glob per line, # for comments).
+# Already skipped automatically, no need to list them: any folder with a pyvenv.cfg (Python virtualenv),
+# venv, .venv, node_modules, __pycache__, *.pyc, .git, .tox, .mypy_cache, .pytest_cache, *.egg-info,
+# site-packages. Add your own below; a pattern with a / is matched inside the folder being scanned
+# (exploits/, loot/, ...), e.g.:
+#   tools/vendor
+#   *.o
+IGN
+  return 0
+}
+
 # files_by_mtime <dir> [find-args...]: relative file names under <dir>, oldest first (excluded paths skipped)
 files_by_mtime() {
   local d="$1"; shift
@@ -1545,6 +1563,7 @@ make_report() {
   [[ -f "$dir/box.env" ]] || { echo "mkbox: $dir is not a box (no box.env)" >&2; exit 1; }
 
   mkdir -p "$rdir" "$dir/notes"
+  ensure_ignore_file "$dir"
   md="$rdir/$name-report.md"
   # shellcheck source=/dev/null
   ip="$(. "$dir/box.env"; echo "${IP:-}")"
@@ -1880,6 +1899,7 @@ if [[ ! -d "$BOX_DIR" ]]; then
   chmod 700 "$BOX_DIR" 2>/dev/null || true      # private by default: the logs hold everything you type
 fi
 for d in "${SUBDIRS[@]}"; do mkdir -p "$BOX_DIR/$d"; done
+ensure_ignore_file "$BOX_DIR"
 
 # --- keep the box out of git by default; never overwrite one the user replaced themselves ---
 if [[ ! -e "$BOX_DIR/.gitignore" ]]; then

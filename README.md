@@ -389,7 +389,7 @@ Cleanup behaves like a simple terminal: carriage returns and backspaces move a c
 `mkbox -r <box>` writes two files into `<box>/report/`:
 
 - `<boxname>-report.md`: a draft assembled from your notes, a chronological log, nmap results, screenshots, exploit and loot filenames, and a credentials section.
-**Excluding clutter.** Python virtualenvs (any folder containing `pyvenv.cfg`, whatever its name), `venv`, `.venv`, `node_modules`, `__pycache__`, `*.pyc`, `.git`, `.tox`, `*.egg-info` and `site-packages` are skipped automatically: they stay out of the report's file lists and inlined code and out of the evidence tarball. To skip more, put one glob per line in `<box>/.mkboxignore` (`#` comments allowed; a pattern containing `/`, like `tools/vendor`, matches the path inside the scanned folder, e.g. `exploits/`) or set `MKBOX_EXCLUDE="pat1 pat2"`. The files themselves are never touched.
+**Excluding clutter.** Python virtualenvs (any folder containing `pyvenv.cfg`, whatever its name), `venv`, `.venv`, `node_modules`, `__pycache__`, `*.pyc`, `.git`, `.tox`, `*.egg-info` and `site-packages` are skipped automatically: they stay out of the report's file lists and inlined code and out of the evidence tarball. To skip more, put one glob per line in `<box>/.mkboxignore` (`#` comments allowed; a pattern containing `/`, like `tools/vendor`, matches the path inside the scanned folder, e.g. `exploits/`) or set `MKBOX_EXCLUDE="pat1 pat2"`. Re-entering (or running `-r` on) a box from an older version drops a commented starter `.mkboxignore` into it, never overwriting an existing one. The files themselves are never touched.
 
 - `<boxname>-evidence.tar.gz`: `notes/`, `screenshots/`, `nmap/`, `exploits/`, `web/`, the cleaned session log, and the report draft.
 
