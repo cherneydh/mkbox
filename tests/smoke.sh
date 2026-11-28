@@ -860,6 +860,20 @@ rm -f exc/.mkboxignore; "$MK" -r exc > /dev/null 2>&1
 check "exclude: -r on an old box adds the starter file" test -f exc/.mkboxignore
 rm -rf exc
 
+# --- password scan skips excluded paths ---
+"$MK" -n sec 10.8.8.8 > /dev/null 2>&1
+mkdir -p sec/exploits/venv/lib sec/exploits/tools
+echo 'pyvenv' > sec/exploits/venv/pyvenv.cfg
+echo 'Zq9PassWord' > sec/exploits/venv/lib/dep.py; echo 'Zq9PassWord' > sec/exploits/real.py
+echo 'Zq9PassWord' > sec/exploits/tools/vend.py
+printf 'exploits/tools\n' > sec/.mkboxignore
+printf 'x\tx\tadmin:Zq9PassWord\n' > sec/creds/creds.txt
+"$MK" -r sec > "$T/sec.out" 2>&1
+check "secret scan: real file still flagged"          has "$T/sec.out" "exploits/real.py"
+check "secret scan: venv file not flagged"            bash -c "! grep -q 'dep.py' '$T/sec.out'"
+check "secret scan: .mkboxignore (exploits/ prefix) honoured" bash -c "! grep -q 'vend.py' '$T/sec.out'"
+rm -rf sec
+
 echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

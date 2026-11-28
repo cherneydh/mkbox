@@ -34,7 +34,9 @@ and the exact submission file format.
   tarball. Add your own in `<box>/.mkboxignore` (one glob per line, `#` comments; a pattern with a `/`
   such as `tools/vendor` matches the path inside that folder) or in `$MKBOX_EXCLUDE` (space-separated).
   Entering or reporting on a box made by an older version creates a commented starter `.mkboxignore`
-  there (never overwriting yours); the defaults apply to old boxes with or without it.
+  there (never overwriting yours); the defaults apply to old boxes with or without it. The "password
+  also appears in" warning skips excluded paths too, and `.mkboxignore` accepts `exploits/venv` as well
+  as `venv`.
 - **Leaving the box shell now shows log-cleanup progress.** After `exit`, mkbox prints
   `wrapping up - cleaning the session log` and a progress bar (percent done, which session it is on)
   while the cleaned log is rebuilt, so a long session doesn't look hung. Ctrl-C is ignored during this
@@ -48,7 +50,7 @@ and the exact submission file format.
 
 ### Internal
 
-- `VERSION` is 1.5.1. tests/smoke.sh: 29 new checks (348/348 passing; `7z` is stubbed, so they don't need
+- `VERSION` is 1.5.1. tests/smoke.sh: 29 new checks (351/351 passing; `7z` is stubbed, so they don't need
   it installed).
 
 ## 1.5.0

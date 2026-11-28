@@ -402,7 +402,8 @@ _closest_sibling_box() {
 # Skipped by files_by_mtime (so the file lists and the inlined exploit code) and left out of the evidence
 # tarball. Any directory holding a pyvenv.cfg is treated as a virtualenv whatever it is called. Add your
 # own globs, one per line, in <box>/.mkboxignore (blank lines and # comments are fine; a pattern with a /
-# is matched against the path inside the folder being scanned, e.g. exploits/tools/*), or space-separated
+# is matched against the path inside the folder being scanned, e.g. tools/*; a leading exploits/ etc. is
+# accepted too), or space-separated
 # in $MKBOX_EXCLUDE.
 MKBOX_DEFAULT_EXCLUDE=(venv .venv __pycache__ '*.pyc' node_modules .git .tox .mypy_cache .pytest_cache '*.egg-info' site-packages)
 
@@ -418,6 +419,7 @@ exclude_patterns() {
       pat="${pat%$'\r'}"; pat="${pat#"${pat%%[![:space:]]*}"}"; pat="${pat%"${pat##*[![:space:]]}"}"
       [[ -z "$pat" || "$pat" == \#* ]] && continue
       pat="${pat%/}"; pat="${pat#./}"
+      pat="${pat#"$(basename -- "$d")"/}"        # "exploits/venv" works the same as "venv" when scanning exploits/
       [[ -n "$pat" ]] && printf '%s\n' "$pat"
     done < "$ig"
   fi
@@ -683,8 +685,16 @@ _warn_secrets_keep() {
 # _warn_secrets_keep); anything else (a note, a command, a pasted file) does.
 warn_secrets() {
   local dir="$1"; shift
-  local f="$dir/creds/creds.txt" line cred user pass hits
+  local f="$dir/creds/creds.txt" line cred user pass hits p
   [[ -s "$f" ]] || return 0
+  # Files to scan, with the same exclusions as the report (venvs, .mkboxignore, ...): a password that
+  # happens to appear inside a dependency folder is not a leak in what you hand in.
+  local list; list="$(
+    for p in "$@"; do
+      if [[ -d "$dir/$p" ]]; then files_by_mtime "$dir/$p" | sed "s|^|$p/|"
+      elif [[ -f "$dir/$p" ]]; then printf '%s\n' "$p"; fi
+    done)"
+  [[ -n "$list" ]] || return 0
   while IFS= read -r line; do
     cred="$(awk '{print $3}' <<<"$line")"
     [[ "$cred" == *:* ]] || continue
@@ -692,7 +702,7 @@ warn_secrets() {
     pass="${cred#*:}"
     [[ ${#pass} -ge 4 ]] || continue
     # shellcheck disable=SC2015  # "A && B || true" is intended: a failed lookup must never abort the report
-    hits="$(cd "$dir" && grep -rInHF -- "$pass" "$@" 2>/dev/null | _warn_secrets_keep "$cred" | cut -d: -f1 | sort -u | paste -sd, || true)"
+    hits="$(cd "$dir" && tr '\n' '\0' <<<"$list" | xargs -0 -r grep -InHF -- "$pass" 2>/dev/null | _warn_secrets_keep "$cred" | cut -d: -f1 | sort -u | paste -sd, || true)"
     if [[ -n "$hits" ]]; then
       echo "WARNING: the password recorded for '$user' also appears in: $hits"
     fi
