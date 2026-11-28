@@ -27,6 +27,12 @@ and the exact submission file format.
 
 ### Changed
 
+- **Virtualenvs and other clutter are left out of the report and evidence tarball.** Any folder with a
+  `pyvenv.cfg` is treated as a Python virtualenv (whatever it's called), and `venv`, `.venv`,
+  `node_modules`, `__pycache__`, `*.pyc`, `.git`, `.tox`, `*.egg-info`, `site-packages` and tool caches
+  are skipped by default, so they don't flood the file lists, get inlined as "your script", or bloat the
+  tarball. Add your own in `<box>/.mkboxignore` (one glob per line, `#` comments; a pattern with a `/`
+  such as `tools/vendor` matches the path inside that folder) or in `$MKBOX_EXCLUDE` (space-separated).
 - **Leaving the box shell now shows log-cleanup progress.** After `exit`, mkbox prints
   `wrapping up - cleaning the session log` and a progress bar (percent done, which session it is on)
   while the cleaned log is rebuilt, so a long session doesn't look hung. Ctrl-C is ignored during this
@@ -40,7 +46,7 @@ and the exact submission file format.
 
 ### Internal
 
-- `VERSION` is 1.5.1. tests/smoke.sh: 29 new checks (334/334 passing; `7z` is stubbed, so they don't need
+- `VERSION` is 1.5.1. tests/smoke.sh: 29 new checks (344/344 passing; `7z` is stubbed, so they don't need
   it installed).
 
 ## 1.5.0

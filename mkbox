@@ -398,10 +398,51 @@ _closest_sibling_box() {
   fi
 }
 
-# files_by_mtime <dir> [find-args...]: relative file names under <dir>, oldest first
+# Things that don't belong in a report or evidence bundle: Python virtualenvs, dependency folders, caches.
+# Skipped by files_by_mtime (so the file lists and the inlined exploit code) and left out of the evidence
+# tarball. Any directory holding a pyvenv.cfg is treated as a virtualenv whatever it is called. Add your
+# own globs, one per line, in <box>/.mkboxignore (blank lines and # comments are fine; a pattern with a /
+# is matched against the path inside the folder being scanned, e.g. exploits/tools/*), or space-separated
+# in $MKBOX_EXCLUDE.
+MKBOX_DEFAULT_EXCLUDE=(venv .venv __pycache__ '*.pyc' node_modules .git .tox .mypy_cache .pytest_cache '*.egg-info' site-packages)
+
+# exclude_patterns <scan_dir>: the exclusion globs that apply under <scan_dir> (a folder directly inside a
+# box), one per line: the defaults, $MKBOX_EXCLUDE, <box>/.mkboxignore, and any virtualenv found there.
+exclude_patterns() {
+  local d="$1" ig pat cfg
+  printf '%s\n' "${MKBOX_DEFAULT_EXCLUDE[@]}"
+  for pat in ${MKBOX_EXCLUDE:-}; do printf '%s\n' "$pat"; done
+  ig="$(dirname -- "$d")/.mkboxignore"
+  if [[ -f "$ig" ]]; then
+    while IFS= read -r pat || [[ -n "$pat" ]]; do
+      pat="${pat%$'\r'}"; pat="${pat#"${pat%%[![:space:]]*}"}"; pat="${pat%"${pat##*[![:space:]]}"}"
+      [[ -z "$pat" || "$pat" == \#* ]] && continue
+      pat="${pat%/}"; pat="${pat#./}"
+      [[ -n "$pat" ]] && printf '%s\n' "$pat"
+    done < "$ig"
+  fi
+  while IFS= read -r cfg; do
+    [[ -n "$cfg" ]] || continue
+    cfg="$(dirname -- "$cfg")"
+    [[ "$cfg" == "$d" ]] && continue
+    printf '%s\n' "${cfg#"$d"/}"
+  done < <(find "$d" -maxdepth 4 -name pyvenv.cfg -type f 2>/dev/null)
+}
+
+# files_by_mtime <dir> [find-args...]: relative file names under <dir>, oldest first (excluded paths skipped)
 files_by_mtime() {
   local d="$1"; shift
-  find "$d" -type f "$@" -printf '%T@\t%P\n' 2>/dev/null | sort -n | cut -f2-
+  local -a pr=() 
+  local pat
+  while IFS= read -r pat; do
+    [[ -n "$pat" ]] || continue
+    if [[ "$pat" == */* ]]; then pr+=(-path "$d/$pat" -o); else pr+=(-name "$pat" -o); fi
+  done < <(exclude_patterns "$d")
+  if [[ ${#pr[@]} -gt 0 ]]; then
+    unset 'pr[${#pr[@]}-1]'
+    pr=( \( "${pr[@]}" \) -prune -o )
+  fi
+  find "$d" "${pr[@]}" -type f "$@" -printf '%T@\t%P\n' 2>/dev/null | sort -n | cut -f2-
 }
 
 # ordered_screenshots <screenshots_dir>: image names in the order they were taken. Screenshots saved
@@ -1638,7 +1679,16 @@ make_report() {
   if [[ "$with_creds" -eq 1 && -d "$dir/creds" ]]; then
     items+=("creds")
   fi
-  tar -czf "$rdir/$name-evidence.tar.gz" -C "$dir" "${items[@]}"
+  local -a tx=() 
+  local pat
+  for p in "${items[@]}"; do
+    [[ -d "$dir/$p" ]] || continue
+    while IFS= read -r pat; do
+      [[ -n "$pat" ]] || continue
+      if [[ "$pat" == */* ]]; then tx+=("--exclude=$p/$pat"); else tx+=("--exclude=$pat"); fi
+    done < <(exclude_patterns "$dir/$p")
+  done
+  tar -czf "$rdir/$name-evidence.tar.gz" "${tx[@]}" -C "$dir" "${items[@]}"
   chmod 600 "$rdir/$name-evidence.tar.gz" 2>/dev/null || true
 
   echo "Report draft: $md"

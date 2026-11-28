@@ -826,6 +826,31 @@ check "typo: one-char-off AD box name flagged too" has "$T/addc.out" "close to t
 rm -rf smok unrelated-short-name ad-dcx
 check "re-entering: no greeting"         bash -c "! grep -q 'Happy Hacking' '$T/e1.out'"
 
+# --- exclusions: virtualenvs, dependency folders, .mkboxignore ---
+"$MK" -n exc 10.7.7.7 > /dev/null 2>&1
+mkdir -p exc/exploits/venv/lib/site-packages exc/exploits/myenv exc/exploits/tools/vendor exc/exploits/build exc/exploits/node_modules/m
+echo 'print("keep")' > exc/exploits/poc.py
+echo 'home = /usr' > exc/exploits/myenv/pyvenv.cfg;  echo 'import x' > exc/exploits/myenv/act.py
+echo 'junk' > exc/exploits/venv/lib/site-packages/dep.py
+echo 'junk' > exc/exploits/node_modules/m/i.js
+echo 'v' > exc/exploits/tools/vendor/lib.py; echo 'mine' > exc/exploits/tools/mine.py
+echo 'b' > exc/exploits/build/out.py
+printf '# ignores\ntools/vendor/\nbuild\n' > exc/.mkboxignore
+"$MK" -r exc > /dev/null 2>&1
+XR=exc/report/exc-report.md; XT=exc/report/exc-evidence.tar.gz
+check "exclude: normal script is listed"        has "$XR" "- poc.py"
+check "exclude: nested own script is listed"    has "$XR" "- tools/mine.py"
+check "exclude: named venv skipped"             bash -c "! grep -q 'dep.py' '$XR'"
+check "exclude: venv with a custom name skipped (pyvenv.cfg)" bash -c "! grep -q 'act.py' '$XR'"
+check "exclude: node_modules skipped"           bash -c "! grep -q 'i.js' '$XR'"
+check "exclude: .mkboxignore path pattern"      bash -c "! grep -q 'lib.py' '$XR'"
+check "exclude: .mkboxignore name pattern"      bash -c "! grep -q 'out.py' '$XR'"
+check "exclude: tarball keeps real files"       bash -c "tar -tzf '$XT' | grep -q 'exploits/poc.py'"
+check "exclude: tarball drops venvs and ignores" bash -c "! tar -tzf '$XT' | grep -E 'dep.py|act.py|i.js|lib.py|out.py'"
+MKBOX_EXCLUDE='mine.py' "$MK" -r exc > /dev/null 2>&1
+check "exclude: \$MKBOX_EXCLUDE adds patterns"  bash -c "! grep -q 'mine.py' '$XR'"
+rm -rf exc
+
 echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
